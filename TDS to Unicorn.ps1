@@ -8,7 +8,7 @@ function New-SitecoreItem{
 
     $sitecoreItem = new-object PSObject
     $sitecoreItem | Add-Member -MemberType NoteProperty -Name Database -Value $database
-    $sitecoreItem | Add-Member -MemberType NoteProperty -Name Itempath -Value $elem.Attributes["Include"].Value
+    $sitecoreItem | Add-Member -MemberType NoteProperty -Name Itempath -Value $elem.Attributes["Include"].Value.Replace(".item","")
     $sitecoreItem | Add-Member -MemberType NoteProperty -Name Child -Value $elem.ChildItemSynchronization
     $sitecoreItem | Add-Member -MemberType NoteProperty -Name AlwaysInclude -Value $elem.ItemDeployment
 
@@ -79,7 +79,7 @@ function GenerateModuleConfig{
             $type = GetSectionName $path
 
         $nameValue = Get-PredicateName ([ref]$nameIndex) $layer $filename $type $database
-        $baseItemList = $baseItemList | Sort
+        #$baseItemList = $baseItemList | Sort
         if( $baseItemList -inotcontains $scpath)
         {
            # Write-Host $scpath $child $always
@@ -194,11 +194,52 @@ param ($layer)
     return $dependency
 }
 
+function PrepareBaseItemlist
+{
+    [CmdletBinding()]
+    param ($groupProject)
+    $key = $groupProject | ? { $_ -Like "*$SerializeFoundationPrj*"}
+
+    $projName = $key.Replace($key.Substring($key.IndexOf(".")),"")
+    $configName = $key.Replace("$projName.","")
+    $desc = $key.replace("."," " )
+    $layer = $configName.Replace($configName.Substring($configName.LastIndexOf(".")),"")
+    $moduleName = $configName.replace("$layer.","")
+    $dependency = GetDependency $layer
+
+    if($dependency -eq $configName)
+    {
+        $dependency = ""
+    }
+    $baseItemList = @()
+    foreach($file in $grpscProject.$key)
+        {
+           # Write-Host $prg
+
+            $xml = [xml](Get-Content $file)
+            $ns = new-object Xml.XmlNamespaceManager $xml.NameTable
+            $ns.AddNamespace("msb", "http://schemas.microsoft.com/developer/msbuild/2003")
+            $database = $xml.Project.PropertyGroup[0].SitecoreDatabase
+            $namespace = $xml.Project.PropertyGroup[0].Name
+    
+            $sitecoreNodes = $xml.selectnodes("//msb:SitecoreItem",$ns)
+            $count = $sitecoreNodes | measure
+            
+            $baseItemList += $sitecoreNodes | % { return New-SitecoreItem $_ -Database $database } | 
+                                select -ExpandProperty  ItemPath -Unique 
+
+            $baseItemList = $baseItemList | Get-Unique | Sort 
+        }
+        return $baseItemList
+}
+
 function ProcessGroup{
 
 [CmdletBinding()]
 param ($groupProject)
     
+
+    $baseItemList = PrepareBaseItemlist $groupProject.Keys
     foreach($key in  $groupProject.Keys)
     {
         
@@ -216,14 +257,14 @@ param ($groupProject)
         {
             $dependency = ""
         }
-        #$path.Substring($path.LastIndexOf("/") + 1)
+
         Write-Host "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
        
         Write-Host "   <configuration name=""$configName"" description=""$desc"" dependencies=""$dependency"" extends="""">" #$projectName.$layer
         Write-Host "    <predicate>"
         
         $sitecoreItems = @()
-        $baseItemList = @()
+        #
 
         foreach($file in $grpscProject.$key)
         {
@@ -242,24 +283,6 @@ param ($groupProject)
                                 select -Property Database, ItemPath, Child, AlwaysInclude -Unique 
 
             $sitecoreItems = $sitecoreItems | select -Property Database, ItemPath, Child, AlwaysInclude -Unique | Sort -Property Database,ItemPath
-
-            #Write-Host " "
-            #Write-Host $database-$namespace $count.Count
-            #Write-Host "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
-            $baseItemList = @()
-            $baseItemList += "sitecore\content"
-            $baseItemList += "sitecore\layout"
-            $baseItemList += "sitecore\system"
-            $baseItemList += "sitecore\system\Modules"
-            $baseItemList += "sitecore\system\Social"
-            $baseItemList += "sitecore\layout\Renderings"
-            $baseItemList += "sitecore\media library"
-            $baseItemList += "sitecore\templates"
-            $baseItemList += "sitecore\layout\Models"
-            $baseItemList += $("sitecore\layout\Models\$($layer)")
-            $baseItemList += $("sitecore\media library\$($layer)")
-            $baseItemList += $("sitecore\layout\Renderings\$layer")
-            $baseItemList += $("sitecore\templates\$($layer)")
         }
         GenerateModuleConfig $namespace $sitecoreItems $layer
 
@@ -277,9 +300,11 @@ Write-Host @"
 
 clear
 $nameIndex =@()
-
+$baseItemList = @()
 $projectName = "ProjectName"
 $FolderPath = "C:\ProjectName\src\"
+$SerializeFoundationPrj = "Foundation.Serialization"
+
 Set-Location -Path $FolderPath
 $scproj = Get-ChildItem -Path .\ -Filter *Foundation.*.scproj -Recurse -File -Name | ForEach-Object {$FolderPath + $_} | Sort #| % { Write-Host $_}
 
