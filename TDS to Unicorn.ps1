@@ -16,7 +16,7 @@ function New-SitecoreItem{
 }
 
 function Get-PredicateName{
-    #[CmdletBinding()]
+    [CmdletBinding()]
     param(
         [ref]$nameIndex,
         $layer,
@@ -79,8 +79,9 @@ function GenerateModuleConfig{
             $type = GetSectionName $path
 
         $nameValue = Get-PredicateName ([ref]$nameIndex) $layer $filename $type $database
+        $tempPath = $database + ":" + $scpath
         #$baseItemList = $baseItemList | Sort
-        if( $baseItemList -inotcontains $scpath)
+        if( $baseItemList -inotcontains $tempPath)
         {
            # Write-Host $scpath $child $always
             
@@ -113,10 +114,10 @@ function GenerateModuleConfig{
             }
             else
             {
-                Write-Host $scpath $child $always -ForegroundColor Red -BackgroundColor White
+                #Write-Host $database $scpath $child $always -ForegroundColor Red -BackgroundColor White
             }
         }
-        elseif( ($baseItemList.Contains($scpath) -eq $true)  -and ($layer -like "*Foundation.Serialization*"))
+        elseif( ($baseItemList.Contains($tempPath) -eq $true)  -and ($namespace -like "*Foundation.Serialization*"))
         {
 
             if($child -eq "KeepAllChildrenSynchronized")
@@ -131,8 +132,12 @@ function GenerateModuleConfig{
             }
             else
             {
-                Write-Host $scpath $child $always -ForegroundColor Red -BackgroundColor White
+                #Write-Host $database $scpath $child $always -ForegroundColor Red -BackgroundColor White
             }
+        }
+        else
+        {
+                #Write-Host $database $scpath $child $always -ForegroundColor Red -BackgroundColor White
         }
     }
 }
@@ -225,8 +230,10 @@ function PrepareBaseItemlist
             $sitecoreNodes = $xml.selectnodes("//msb:SitecoreItem",$ns)
             $count = $sitecoreNodes | measure
             
-            $baseItemList += $sitecoreNodes | % { return New-SitecoreItem $_ -Database $database } | 
-                                select -ExpandProperty  ItemPath -Unique 
+            $baseItemList += $sitecoreNodes |
+                             % { return New-SitecoreItem $_ -Database $database } |
+                             Select-Object @{name="Path"; expression={$database + ":" + $_.ItemPath}} |
+                             select -ExpandProperty Path -Unique
 
             $baseItemList = $baseItemList | Get-Unique | Sort 
         }
@@ -258,9 +265,9 @@ param ($groupProject)
             $dependency = ""
         }
 
-        Write-Host "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
-       
-        Write-Host "   <configuration name=""$configName"" description=""$desc"" dependencies=""$dependency"" extends="""">" #$projectName.$layer
+        #Write-Host "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
+        Write-Host " "
+        Write-Host "   <configuration name=""$configName"" description=""$desc"" dependencies=""$dependency"" extends=""$projectName.$layer"">" 
         Write-Host "    <predicate>"
         
         $sitecoreItems = @()
@@ -289,9 +296,9 @@ param ($groupProject)
 
 Write-Host @"
     </predicate>
-    <rolePredicate>
+    <!--<rolePredicate>
         <include domain="modules" pattern="^Feature $moduleName .*$" />
-    </rolePredicate>
+    </rolePredicate>-->
     </configuration>
 "@
        
@@ -306,7 +313,7 @@ $FolderPath = "C:\ProjectName\src\"
 $SerializeFoundationPrj = "Foundation.Serialization"
 
 Set-Location -Path $FolderPath
-$scproj = Get-ChildItem -Path .\ -Filter *Foundation.*.scproj -Recurse -File -Name | ForEach-Object {$FolderPath + $_} | Sort #| % { Write-Host $_}
+$scproj = Get-ChildItem -Path .\ -Filter *.scproj -Recurse -File -Name | ForEach-Object {$FolderPath + $_} | Sort #| % { Write-Host $_}
 
 
 $uniquescproject = $scproj | 
