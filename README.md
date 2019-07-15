@@ -16,8 +16,12 @@ This script is tested on internal projects only, thus feel free to modify to sat
 
 ### Suggestion
 
-Please share your suggestions or if you find the better way to do it @it.mrunal@gmail.com.
+Please share your suggestions or if you find the better way to do it @ it.mrunal@gmail.com.
 
+### Thanks
+
+Thanks to [https://twitter.com/RichardHauer] (@RichardHauer) for sharing expert powershell script guide.
+ 
 Happy Sharing.
 
 
