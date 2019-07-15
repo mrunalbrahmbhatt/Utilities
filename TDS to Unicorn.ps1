@@ -1,3 +1,9 @@
+[CmdletBinding()]
+param(
+[string]$SrcFolderPath = "C:\ProjectName\src\",
+[string]$ProjectName = "ProjectName"
+)
+
 function New-SitecoreItem{
     param
     (
@@ -305,15 +311,17 @@ Write-Host @"
     }
 }
 
+
+
 clear
 $nameIndex =@()
 $baseItemList = @()
-$projectName = "ProjectName"
-$FolderPath = "C:\ProjectName\src\"
-$SerializeFoundationPrj = "Foundation.Serialization"
+$projectName = $ProjectName 
+$FolderPath = $SrcFolderPath
+$SerializeFoundationPrj = "Foundation.Serialization" # Foundation Serialization Project Name, change if it's diffrent in your case.
 
-Set-Location -Path $FolderPath
-$scproj = Get-ChildItem -Path .\ -Filter *.scproj -Recurse -File -Name | ForEach-Object {$FolderPath + $_} | Sort #| % { Write-Host $_}
+#Set-Location -Path $FolderPath
+$scproj = Get-ChildItem -Path $FolderPath -Filter *.scproj -Recurse -File -Name | ForEach-Object {$FolderPath + $_} | Sort #| % { Write-Host $_}
 
 
 $uniquescproject = $scproj | 
