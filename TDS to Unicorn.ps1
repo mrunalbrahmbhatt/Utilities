@@ -311,8 +311,6 @@ Write-Host @"
     }
 }
 
-
-
 clear
 $nameIndex =@()
 $baseItemList = @()
@@ -320,7 +318,6 @@ $projectName = $ProjectName
 $FolderPath = $SrcFolderPath
 $SerializeFoundationPrj = "Foundation.Serialization" # Foundation Serialization Project Name, change if it's diffrent in your case.
 
-#Set-Location -Path $FolderPath
 $scproj = Get-ChildItem -Path $FolderPath -Filter *.scproj -Recurse -File -Name | ForEach-Object {$FolderPath + $_} | Sort #| % { Write-Host $_}
 
 
@@ -333,23 +330,14 @@ $uniquescproject = $scproj |
 $grpscProject = @{}
 foreach($u in  $uniquescproject)
 {
-    #Write-Host $u
     $grpscProject[$u] = @()
     foreach($p in $scproj)
     {
-        #Write-Host $p - $u
-
         if($p -like "*$u*")
         {
-           # Write-Host "maching $p"
             $grpscProject[$u] += $p
         }
     }
-
-    #foreach($m in $grpscProject[$u])
-    #{
-    #    Write-Host $m
-    #}
 }
 
 Write-Host '<configuration xmlns:patch="http://www.sitecore.net/xmlconfig/" xmlns:role="http://www.sitecore.net/xmlconfig/role/">'
