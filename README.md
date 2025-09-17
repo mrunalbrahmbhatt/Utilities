@@ -11,11 +11,13 @@ This script will crawl your given folder for .scproj files and generates the 95%
 2. Replace "ProjectName" in "Unicorn.ProjectName.Config" file content and name.
 
 ## 2. sync-workflows.sh
-This script will download all repostiories one by one, and upload Microsoft Security DevOps Workflow in github 
+The script lists all non-archived repositories, fetches their default branch, clones each, adds msdevopssec.yml, commits, and pushes to the correct branch.
 ### How to use [Bash command]:
 
 1. Make sure [msdevopssec.yml](https://github.com/mrunalbrahmbhatt/Utilities/blob/master/.github/workflows/msdevopssec.yml) is in same folder as script.
-2. $ ./sync-workflows.sh
+2. chmod +x sync-workflows.sh
+3. gh auth login
+4. ./sync-workflows.sh
 
 
 ### Disclaimer
