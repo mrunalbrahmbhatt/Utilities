@@ -22,7 +22,7 @@ The script lists all non-archived repositories, fetches their default branch, cl
 
 ### Disclaimer
 
-This script is tested on internal projects only, thus feel free to modify to satisfy your needs. I'm not PowerShell/Shell script expert so please ignore my poor scripting. Also, I'm not favoring any tool here.
+This script is tested on internal projects only, thus feel free to modify to satisfy your needs. I'm not PowerShell/Shell script expert so please ignore my poor scripting. Also, I'm not favoring any tool here.Use at your own risk.
 
 ### Suggestion
 
