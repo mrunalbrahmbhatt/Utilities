@@ -10,7 +10,7 @@ This script will crawl your given folder for .scproj files and generates the 95%
 1. .\TDStoUnicorn2.ps1 -ProjectName "ProjectName"  *> Project.Website.Serialization.config
 2. Replace "ProjectName" in "Unicorn.ProjectName.Config" file content and name.
 
-## 2. sync-workflows.sh
+## 2. [Sync-workflow in mulitiple repositories](https://github.com/mrunalbrahmbhatt/Utilities/blob/master/sync-workflows.sh)
 The script lists all non-archived repositories, fetches their default branch, clones each, adds msdevopssec.yml (Microsoft Secuirty DevOps Task), commits, and pushes to the correct branch.
 ### How to use [Bash command]:
 
