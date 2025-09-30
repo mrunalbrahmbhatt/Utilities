@@ -20,6 +20,37 @@ The script lists all non-archived repositories, fetches their default branch, cl
 4. ./sync-workflows.sh
 
 
+
+## 3. Cloud App Discovery Export Script
+This PowerShell script retrieves **discovered cloud applications** and their associated **users** from the Microsoft Graph **Cloud App Discovery API** and exports the data to a CSV file.  
+It uses **OAuth 2.0 client credentials (App ID + Secret)** for secure, non-interactive authentication.
+
+
+### 🔒 Requirements
+- **Azure AD App Registration** with:
+  - Microsoft Graph API **Application Permission**: `CloudApp-Discovery.Read.All`
+  - Admin consent granted
+- PowerShell module: `Microsoft.Graph.Authentication` (v2.0.0+)
+- Network access to:
+  - `https://login.microsoftonline.com`
+  - `https://graph.microsoft.com`
+
+
+### ⚙️ Parameters
+
+<pre><code class="language-powershell">
+$streamId     = ""   # Uploaded stream ID
+$csvPath      = "C:\Temp\CloudApps_Users.csv"
+$period       = "P90D"   # Duration (e.g., P30D, P90D)
+$tenantId     = ""
+$clientId     = ""
+$clientSecret = ""   # Store securely (e.g., Azure Key Vault)
+</code></pre>
+
+### ✅ Usage
+<pre><code class="language-powershell">.\Get-CloudAppDiscovery.ps1</code></pre>
+
+
 ### Disclaimer
 
 This script is tested on internal projects only, thus feel free to modify to satisfy your needs. I'm not PowerShell/Shell script expert so please ignore my poor scripting. Also, I'm not favoring any tool here.Use at your own risk.
