@@ -21,7 +21,7 @@ The script lists all non-archived repositories, fetches their default branch, cl
 
 
 
-## 3. Cloud App Discovery Export Script
+## 3. [Cloud App Discovery Export Script](https://github.com/mrunalbrahmbhatt/Utilities/blob/master/Get-CloudAppDiscovery.ps1)
 This PowerShell script retrieves **discovered cloud applications** and their associated **users** from the Microsoft Graph **Cloud App Discovery API** and exports the data to a CSV file.  
 It uses **OAuth 2.0 client credentials (App ID + Secret)** for secure, non-interactive authentication.
 
