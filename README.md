@@ -19,12 +19,9 @@ The script lists all non-archived repositories, fetches their default branch, cl
 3. gh auth login
 4. ./sync-workflows.sh
 
-
-
 ## 3. [Cloud App Discovery Export Script](https://github.com/mrunalbrahmbhatt/Utilities/blob/master/Get-CloudAppDiscovery.ps1)
 This PowerShell script retrieves **discovered cloud applications** and their associated **users** from the Microsoft Graph **Cloud App Discovery API** and exports the data to a CSV file.  
 It uses **OAuth 2.0 client credentials (App ID + Secret)** for secure, non-interactive authentication.
-
 
 ### 🔒 Requirements
 - **Azure AD App Registration** with:
@@ -34,7 +31,6 @@ It uses **OAuth 2.0 client credentials (App ID + Secret)** for secure, non-inter
 - Network access to:
   - `https://login.microsoftonline.com`
   - `https://graph.microsoft.com`
-
 
 ### ⚙️ Parameters
 
@@ -50,6 +46,12 @@ $clientSecret = ""   # Store securely (e.g., Azure Key Vault)
 ### ✅ Usage
 <pre><code class="language-powershell">.\Get-CloudAppDiscovery.ps1</code></pre>
 
+## 4. [Import Export Conditional Access Policies](https://github.com/mrunalbrahmbhatt/Utilities/tree/master/Conditional%20Access%20Policy)
+**PowerShell script to export, import, and manage Microsoft Entra ID (Azure AD) Conditional Access policies via Microsoft Graph.**
+
+Perfect for **backups**, **version control**, **cross-tenant migrations**, and **infrastructure-as-code**.
+
+---
 
 ### Disclaimer
 
@@ -59,5 +61,6 @@ This script is tested on internal projects only, thus feel free to modify to sat
 
 Please share your suggestions or if you find the better way to do it @ it.mrunal@gmail.com.
 Happy Sharing.
+
 
 
