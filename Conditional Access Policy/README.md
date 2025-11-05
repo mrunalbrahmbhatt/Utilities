@@ -32,6 +32,8 @@ The script supports two primary modes of operation, determined by the `Export` o
 | **-Import** | `[switch]` | No | | Imports, updates, or deletes policies based on files in the specified path. |
 | **-InputPath** | `[string]` | Yes (for Import) | | Path to a single JSON file or a folder containing policy JSON files. |
 | **-OutputPath** | `[string]` | No (for Export) | `.` | Folder path where exported policies will be saved. |
+| **-Clean** | `[string]` | Yes (for Export) | `.` | Clean folder before export, deletes all json file. |
+| **-Zip** | `[string]` | Yes (for Export) | `.` | Zip all json file with time stamp. |
 
 ### 1. Exporting Policies
 
