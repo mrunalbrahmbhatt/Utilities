@@ -3,9 +3,14 @@
 param(
     [switch]$Export,           # Export all policies
     [switch]$Import,           # Import from file(s)
+    [switch]$Zip,              # NEW: Zip exported JSONs with datetime
+    [switch]$Clean,            # NEW: Delete existing .json files in OutputPath before export
     [string]$InputPath,        # Single file or folder path
-    [string]$OutputPath = "."  # Export folder
+    [string]$OutputPath = "."  # Export folder (or zip location)
 )
+
+# Load .NET ZIP support (ZIP format only)
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # Connect (interactive if needed)
 Connect-MgGraph -Scopes "Policy.ReadWrite.ConditionalAccess", "Policy.Read.All" -ErrorAction Stop
@@ -18,10 +23,10 @@ function Clean-PolicyBody {
 
     $readOnly = @(
         "id",
-        "@odata.context", 
-        "createdDateTime", 
+        "@odata.context",
+        "createdDateTime",
         "modifiedDateTime",
-        "templateId", 
+        "templateId",
         "version"
     )
     foreach ($key in $readOnly) {
@@ -56,23 +61,75 @@ function Find-Policy {
 if ($Export) {
     Write-Host "Exporting all Conditional Access policies..." -ForegroundColor Cyan
 
-    if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
+    # Resolve export path
+    $exportPath = $OutputPath
+    $tempExportPath = $null
 
+    # If -Zip: export to temp folder first
+    if ($Zip) {
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $tempExportPath = Join-Path ([System.IO.Path]::GetTempPath()) "CA_Export_$timestamp"
+        New-Item -ItemType Directory -Path $tempExportPath -Force | Out-Null
+        $exportPath = $tempExportPath
+        Write-Host "Exporting to temporary folder: $tempExportPath" -ForegroundColor Gray
+    } else {
+        # Ensure output folder exists
+        if (-not (Test-Path $OutputPath)) {
+            New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+        }
+    }
+
+    # -------------------------------
+    # CLEAN: Remove existing .json files if -Clean is used
+    # -------------------------------
+    if ($Clean -and -not $Zip) {
+        $existingJsons = Get-ChildItem -Path $OutputPath -Filter "*.json" -File
+        if ($existingJsons.Count -gt 0) {
+            Write-Host "Cleaning $($existingJsons.Count) existing .json file(s) in '$OutputPath'..." -ForegroundColor Yellow
+            $existingJsons | Remove-Item -Force
+            Write-Host "Clean complete." -ForegroundColor Gray
+        }
+    }
+
+    # -------------------------------
+    # EXPORT POLICIES
+    # -------------------------------
     $policies = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies"
 
     foreach ($pol in $policies.value) {
-        $id = $pol.id
+        $id   = $pol.id
         $name = $pol.displayName
         $safeName = ($name -replace '[\\/:*?"<>|]', '_').Trim()
         $fileName = if ($safeName) { "$safeName.json" } else { "Policy_$id.json" }
-        $filePath = Join-Path $OutputPath $fileName
+        $filePath = Join-Path $exportPath $fileName
 
-        # Save full raw policy
         $pol | ConvertTo-Json -Depth 20 | Out-File $filePath -Encoding UTF8 -Force
         Write-Host "Saved: $filePath" -ForegroundColor Green
     }
 
-    Write-Host "Export complete: $($policies.value.Count) policies saved to '$OutputPath'" -ForegroundColor Cyan
+    Write-Host "Export complete: $($policies.value.Count) policies saved." -ForegroundColor Cyan
+
+    # -------------------------------
+    # ZIP: Create archive if -Zip was used
+    # -------------------------------
+    if ($Zip) {
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $zipFileName = "ConditionalAccess_Policies_$timestamp.zip"
+        $zipFilePath = Join-Path $OutputPath $zipFileName
+
+        Write-Host "Creating ZIP archive: $zipFilePath" -ForegroundColor Yellow
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($tempExportPath, $zipFilePath)
+
+        Write-Host "ZIP created: $zipFilePath" -ForegroundColor Green
+
+        # Clean up temp folder
+        if (Test-Path $tempExportPath) {
+            Remove-Item $tempExportPath -Recurse -Force
+            Write-Host "Temporary export folder removed." -ForegroundColor Gray
+        }
+    }
+
+    Write-Host "Export operation finished." -ForegroundColor Cyan
     return
 }
 
@@ -80,7 +137,7 @@ if ($Export) {
 # 2. IMPORT / UPDATE / DELETE POLICIES
 # -------------------------------
 if (-not $Import) {
-    Write-Host "Use -Export or -Import with -InputPath" -ForegroundColor Red
+    Write-Host "Use -Export [-Zip] [-Clean] [-OutputPath <path>] or -Import -InputPath <path>" -ForegroundColor Red
     return
 }
 
@@ -95,11 +152,9 @@ $deleteFolder = $null
 # Resolve input path
 if (Test-Path $InputPath -PathType Container) {
     $files = Get-ChildItem -Path $InputPath -Filter "*.json" -File -Recurse
-    # Look for 'delete' subfolder
     $deleteFolder = Get-ChildItem -Path $InputPath -Directory -Filter "delete" | Select-Object -First 1
 } elseif (Test-Path $InputPath -PathType Leaf) {
     $files = Get-Item $InputPath
-    # Check if parent has a 'delete' folder
     $parent = Split-Path $InputPath -Parent
     $deleteFolder = Get-ChildItem -Path $parent -Directory -Filter "delete" | Select-Object -First 1
 } else {
@@ -124,7 +179,7 @@ if ($deleteFolder) {
     foreach ($file in $deleteFiles) {
         try {
             $json = Get-Content $file.FullName -Raw | ConvertFrom-Json -AsHashtable
-            $id = $json.id
+            $id   = $json.id
             $name = $json.displayName
 
             $existing = Find-Policy -Id $id -Name $name
@@ -143,7 +198,7 @@ if ($deleteFolder) {
 }
 
 # -------------------------------
-# Step 2: Handle IMPORT/UPDATE (non-delete files)
+# Step 2: Handle IMPORT/UPDATE
 # -------------------------------
 $importFiles = $files | Where-Object { $_.DirectoryName -notlike "*\delete" -and $_.DirectoryName -notlike "*/delete" }
 
@@ -156,23 +211,19 @@ foreach ($file in $importFiles) {
         $json = Get-Content $file.FullName -Raw | ConvertFrom-Json -AsHashtable
         if (-not $json) { throw "Invalid JSON" }
 
-        $originalId = $json.id
-        $displayName = $json.displayName
+        $originalId   = $json.id
+        $displayName  = $json.displayName
 
-        # Clean body for create/update
         $body = Clean-PolicyBody -Body $json
         $bodyJson = $body | ConvertTo-Json -Depth 20
 
-        # Find existing policy: first by ID, then by name
         $existing = Find-Policy -Id $originalId -Name $displayName
 
         if ($existing) {
-            # UPDATE
             $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies/$($existing.id)"
             Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $bodyJson -ContentType "application/json"
             Write-Host "Updated: '$displayName' ($($existing.id))" -ForegroundColor Green
         } else {
-            # CREATE
             $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies"
             $newPol = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $bodyJson -ContentType "application/json"
             Write-Host "Created: '$displayName' (New ID: $($newPol.id))" -ForegroundColor Magenta
@@ -184,15 +235,3 @@ foreach ($file in $importFiles) {
 }
 
 Write-Host "All operations complete." -ForegroundColor Cyan
-
-
-
-
-## 1. Export all
-#.\Manage-ConditionalAccessPolicies.ps1 -Export -OutputPath "C:\CAPolicies"
-#
-## 2. Import + Delete (from folder with 'delete' subfolder)
-#.\Manage-ConditionalAccessPolicies.ps1 -Import -InputPath "C:\CAPolicies"
-#
-## 3. Import single file (and check parent for 'delete')
-#.\Manage-ConditionalAccessPolicies.ps1 -Import -InputPath "C:\CAPolicies\Block Legacy Auth.json"
