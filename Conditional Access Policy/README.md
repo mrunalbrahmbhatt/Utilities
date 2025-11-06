@@ -54,6 +54,9 @@ Move-Item "C:\temp\ca\Policy-to-remove.json" "C:\temp\ca\delete\"
 - Server-side filtered lookups to prevent duplicates
 - Detailed error logging with Graph response bodies
 
+## Roadmap
+- DevOps Friendly
+
 ## Troubleshooting
 
 | Issue | Solution |
