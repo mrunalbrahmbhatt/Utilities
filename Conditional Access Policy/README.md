@@ -17,18 +17,18 @@ Simple yet powerful PowerShell automation to manage Microsoft Entra ID Condition
 
 ```powershell
 # Export all policies
-.\Manage-ConditionalAccessPolicies.improved.ps1 -Export -OutputPath "C:\temp\ca"
+.\Manage-ConditionalAccessPolicies.ps1 -Export -OutputPath "C:\temp\ca"
 
 # Export and create ZIP backup
-.\Manage-ConditionalAccessPolicies.improved.ps1 -Export -Zip -OutputPath "C:\temp\ca"
+.\Manage-ConditionalAccessPolicies.ps1 -Export -Zip -OutputPath "C:\temp\ca"
 
 # Import/update from folder
-.\Manage-ConditionalAccessPolicies.improved.ps1 -Import -InputPath "C:\temp\ca"
+.\Manage-ConditionalAccessPolicies.ps1 -Import -InputPath "C:\temp\ca"
 
 # Delete policies: Move JSONs to 'delete' folder and import
 mkdir "C:\temp\ca\delete"
 Move-Item "C:\temp\ca\Policy-to-remove.json" "C:\temp\ca\delete\"
-.\Manage-ConditionalAccessPolicies.improved.ps1 -Import -InputPath "C:\temp\ca"
+.\Manage-ConditionalAccessPolicies.ps1 -Import -InputPath "C:\temp\ca"
 ```
 
 ## Folder Structure
