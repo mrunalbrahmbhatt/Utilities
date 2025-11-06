@@ -1,86 +1,119 @@
-# Export/Import Conditional Access Policy (Microsoft Graph)
+# 🛡️ CA Policy Manager: Your Conditional Access Guardian
 
-This PowerShell script provides functionality to export and import/update Conditional Access (CA) policies in Azure AD/Entra ID using the Microsoft Graph API. It allows for bulk management of policies, including a specific mechanism for deleting policies via a dedicated folder.
+Simple yet powerful PowerShell automation to manage Microsoft Entra ID Conditional Access policies. Export, import, update, or delete policies with safety guardrails and detailed logging.
 
-The script assumes you are using the `Microsoft.Graph` PowerShell module.
+## Parameters
 
-## Prerequisites
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `-Export` | No | - | Export all policies to JSON files |
+| `-Import` | No | - | Import/update policies from JSON files |
+| `-Zip` | No | False | Create ZIP archive of exports in OutputPath\backup |
+| `-Clean` | No | False | Remove existing JSON files before export |
+| `-InputPath` | Yes (for Import) | - | Source folder containing JSON files or single file path |
+| `-OutputPath` | No | "." | Destination folder for exports and logs |
 
-You must have the following PowerShell module installed:
+## Quick Start
 
-Install-Module -Name Microsoft.Graph.Identity.SignIns
+```powershell
+# Export all policies
+.\Manage-ConditionalAccessPolicies.improved.ps1 -Export -OutputPath "C:\temp\ca"
 
+# Export and create ZIP backup
+.\Manage-ConditionalAccessPolicies.improved.ps1 -Export -Zip -OutputPath "C:\temp\ca"
 
-## Required Permissions (Scopes)
+# Import/update from folder
+.\Manage-ConditionalAccessPolicies.improved.ps1 -Import -InputPath "C:\temp\ca"
 
-The script connects to the Microsoft Graph and requires the following permissions for read and write operations on Conditional Access policies:
+# Delete policies: Move JSONs to 'delete' folder and import
+mkdir "C:\temp\ca\delete"
+Move-Item "C:\temp\ca\Policy-to-remove.json" "C:\temp\ca\delete\"
+.\Manage-ConditionalAccessPolicies.improved.ps1 -Import -InputPath "C:\temp\ca"
+```
 
-* `Policy.ReadWrite.ConditionalAccess`
-* `Policy.Read.All`
+## Folder Structure
 
-You will be prompted to authenticate interactively upon execution if a connection is not already established with these scopes.
+| Folder | Purpose |
+|--------|---------|
+| `OutputPath` | Exported JSON policy files |
+| `OutputPath\log` | Per-run log files |
+| `OutputPath\backup` | ZIP archives when using -Zip |
+| `InputPath\delete` | Place policies here to delete them |
 
-## Usage and Parameters
+## Requirements
 
-The script supports two primary modes of operation, determined by the `Export` or `Import` switch.
+- PowerShell (5.1 or 7+)
+- Microsoft.Graph PowerShell modules
+- Permissions: Policy.ReadWrite.ConditionalAccess, Policy.Read.All
 
-### Parameters
+## Features
 
-| Parameter | Type | Required | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| **-Export** | `[switch]` | No | | Exports all Conditional Access policies to JSON files. |
-| **-Import** | `[switch]` | No | | Imports, updates, or deletes policies based on files in the specified path. |
-| **-InputPath** | `[string]` | Yes (for Import) | | Path to a single JSON file or a folder containing policy JSON files. |
-| **-OutputPath** | `[string]` | No (for Export) | `.` | Folder path where exported policies will be saved. |
-| **-Clean** | `[string]` | Yes (for Export) |  | Clean folder before export, deletes all json file. |
-| **-Zip** | `[string]` | Yes (for Export) |  | Zip all json file with time stamp. |
+- Logs operations to `OutputPath\log`
+- Export filenames include policy ID for stability
+- Safely handles read-only fields and authentication strength
+- Server-side filtered lookups to prevent duplicates
+- Detailed error logging with Graph response bodies
 
-### 1. Exporting Policies
+## Troubleshooting
 
-Use the `-Export` switch and optionally define an output path. The script will save the raw JSON representation of all CA policies.
+| Issue | Solution |
+|-------|----------|
+| **Duplicate policies created** | Ensure policy displayName matches exactly. Check logs in `OutputPath\log` for details. |
+| **Graph schema errors** | View full error in the log file. Usually caused by read-only fields that Clean-PolicyBody should handle. |
+| **Authentication failed** | Verify your account has Policy.ReadWrite.ConditionalAccess permissions. |
+| **Cloud Shell differences** | Script works in both PowerShell 5.1 and 7+, but 7+ is recommended for better JSON handling. |
 
-**Command:**
+## Looking for Logs?
 
-.\Manage-ConditionalAccessPolicies.ps1 -Export -OutputPath "C:\CAPolicies"
+- Console shows real-time progress
+- Detailed logs in `OutputPath\log` folder
+- Full request/response data for debugging
+- Graph error details captured automatically
 
+## License
 
-### 2. Importing, Updating, and Deleting Policies
+MIT Licensed. See LICENSE file.
 
-Use the `-Import` switch along with the `-InputPath` pointing to a folder or a single policy file.
+⚠️ **Important**: 
+- Test in non-production first
+- Review changes before applying
+- Check logs for any errors
+- Back up policies with `-Zip` flag
 
-#### Import & Update Logic
+- Idempotency & duplicates: The script attempts to find existing policies by ID first, then by using a server-side OData `$filter` on `displayName`. This reduces false negatives and prevents creating duplicate policies when the script previously missed a match.
 
-* The script reads JSON files from the specified input path.
-* For each file, it attempts to find an existing policy by its **ID** (if present in the JSON) or its **Display Name**.
-* **If a match is found:** The policy is **updated** (`PATCH`) with the content of the JSON file.
-* **If no match is found:** A new policy is **created** (`POST`).
+- Policy cleaning: Prior to PATCH/POST, the script runs `Clean-PolicyBody` which:
+  - Removes read-only fields (`id`, `createdDateTime`, `modifiedDateTime`, `templateId`, `version`) and any `@odata` metadata.
+  - Removes explicit nulls.
+  - Normalizes `authenticationStrength` into an `{ id: "..." }` reference or removes it if no id is present.
 
-> **Note on Updates:** The script automatically removes read-only properties (`id`, `@odata.context`, `createdDateTime`, etc.) before sending the update/create request to the Graph.
+- Cloud Shell compatibility: The script handles differences in `ConvertFrom-Json` behavior between PS versions by trying `-AsHashtable` first then falling back; however PowerShell 7+ is recommended.
 
-#### Deletion Mechanism
+Troubleshooting
 
-To delete policies, place the policy JSON file (typically exported previously) into a subfolder named **`delete`** within your primary input directory.
+- Duplicate policies still being created:
+  - Confirm the JSON `displayName` exactly matches the policy to update. The script uses server-side filtering but displayName must match exactly to be considered the same policy. Check logs in `OutputPath\log` for filter URIs and results (if you enable additional debug logging).
 
-* The script checks for a `delete` subfolder inside the `-InputPath` directory.
-* Any JSON files found in this `delete` subfolder are processed for deletion.
-* The policy is identified by its ID or Display Name before being deleted (`DELETE`).
+- Graph returns schema errors (BadRequest):
+  - Check the run log — `Log-FullError` attempts to capture the Graph response body and logs the truncated request body. If the error points to a nested read-only object, the script's `Clean-PolicyBody` is designed to remove such fields; open an issue if you have a policy that still fails and include the log.
 
-**Command (Import/Update/Delete from a folder):**
-If `C:\CAPolicies` contains new or updated policy files, and `C:\CAPolicies\delete` contains files for policies to be removed:
+- Authentication/permissions:
+  - Ensure the account you use to Connect-MgGraph has the required scopes/permissions. Interactive Connect-MgGraph is used by default.
 
-.\Manage-ConditionalAccessPolicies.ps1 -Import -InputPath "C:\CAPolicies"
+- Want console echo from logger?
+  - `Write-Log` deliberately doesn't write to console to avoid duplicates. If you want logs echoed, request a change and I can add a global `$script:LogEchoToConsole` switch or an optional `-VerboseLog` parameter.
 
+Extensibility / next steps (optional)
 
-**Command (Import/Update single file):**
-If you only want to import or update one policy file:
+- Add retention logic for `backup` and `log` folders to prune old archives/logs.
+- Add a `-WhatIf`/`-DryRun` mode that shows what would change without calling Graph.
+- Add Pester tests for `Clean-PolicyBody` and `Find-Policy` (mocking Graph responses).
+- Add a `-DebugFindPolicy` flag to log raw Find-Policy URIs and responses for forensic debugging.
 
-.\Manage-ConditionalAccessPolicies.ps1 -Import -InputPath "C:\CAPolicies\Block Legacy Auth.json"
+License / attribution
 
+- This is a helper script intended for administrators. Use at your own risk; test in a non-production tenant before performing bulk changes.
 
-## Helper Functions
+Contact / changes
 
-The script uses two internal helper functions:
-
-1. **`Clean-PolicyBody`**: Removes Graph read-only properties from the policy JSON payload to ensure successful updates and creations.
-
-2. **`Find-Policy`**: Searches for an existing policy by its `id` or `displayName` using the Graph API.
+If you want further changes (retention, debug switches, CI, or tests), tell me which additions you'd like and I can implement them.
