@@ -1,4 +1,4 @@
-# ConvertToPDF.ps1
+# Convert To PDF
 
 Batch convert Microsoft Office documents (Word, Excel, PowerPoint) to PDF format using PowerShell and Office COM automation.
 
