@@ -51,7 +51,17 @@ $clientSecret = ""   # Store securely (e.g., Azure Key Vault)
 
 Perfect for **backups**, **version control**, **cross-tenant migrations**, and **infrastructure-as-code**.
 
----
+
+## 5. [Convert to PDF](https://github.com/mrunalbrahmbhatt/Utilities/edit/master/ToPDF)
+Batch convert Microsoft Office documents (Word, Excel, PowerPoint) to PDF format using PowerShell and Office COM automation.
+
+### Features
+
+- **Multi-format support**: Converts `.doc`, `.docx`, `.rtf`, `.txt`, `.xls`, `.xlsx`, `.xlsm`, `.xlsb`, `.ppt`, and `.pptx` files
+- **Recursive scanning**: Optional subfolder traversal
+- **Flexible output**: Save PDFs next to originals or in a separate folder
+- **Smart skip**: Automatically skips files if PDF already exists
+- **Batch processing**: Converts multiple files in one run
 
 ### Disclaimer
 
