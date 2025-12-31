@@ -23,7 +23,7 @@
     If the detected OrgId doesn't match this value, a CRITICAL alert will be raised.
 
 .EXAMPLE
-    .\ARCCheck.ps1 -ExpectedOrgId "bea9b673-6805-4d37-8f77-d45f8f4d22b9"
+    .\ARCCheck.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
 
 .NOTES
     Requires: Administrator privileges
