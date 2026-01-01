@@ -2,7 +2,7 @@
 Misc. utilities used or developed during development.
 
 
-## 1. TDS to Unicorn
+## 1. [TDS to Unicorn](https://github.com/mrunalbrahmbhatt/Utilities/tree/master/Sitecore)
 This script will crawl your given folder for .scproj files and generates the 95% of equivalent Unicorn single config file. Afterward, the user can customize the generated config according to their needs if something is not working.
 
 ### How to use:
@@ -10,7 +10,7 @@ This script will crawl your given folder for .scproj files and generates the 95%
 1. .\TDStoUnicorn2.ps1 -ProjectName "ProjectName"  *> Project.Website.Serialization.config
 2. Replace "ProjectName" in "Unicorn.ProjectName.Config" file content and name.
 
-## 2. [Sync-workflow in mulitiple repositories](https://github.com/mrunalbrahmbhatt/Utilities/blob/master/sync-workflows.sh)
+## 2. [Sync-workflow in mulitiple repositories](https://github.com/mrunalbrahmbhatt/Utilities/tree/master/GitHub)
 The script lists all non-archived repositories, fetches their default branch, clones each, adds msdevopssec.yml (Microsoft Secuirty DevOps Task), commits, and pushes to the correct branch.
 ### How to use [Bash command]:
 
@@ -19,7 +19,7 @@ The script lists all non-archived repositories, fetches their default branch, cl
 3. gh auth login
 4. ./sync-workflows.sh
 
-## 3. [Cloud App Discovery Export Script](https://github.com/mrunalbrahmbhatt/Utilities/blob/master/Get-CloudAppDiscovery.ps1)
+## 3. [Cloud App Discovery Export Script](https://github.com/mrunalbrahmbhatt/Utilities/tree/master/Cloud%20Apps)
 This PowerShell script retrieves **discovered cloud applications** and their associated **users** from the Microsoft Graph **Cloud App Discovery API** and exports the data to a CSV file.  
 It uses **OAuth 2.0 client credentials (App ID + Secret)** for secure, non-interactive authentication.
 
