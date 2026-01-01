@@ -285,6 +285,21 @@ try {
     $status.SystemDrive.Error = $_.Exception.Message
 }
 
+# Collect Operating System Information
+$status.OperatingSystem = @{}
+try {
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os) {
+        $status.OperatingSystem.Caption = $os.Caption
+        $status.OperatingSystem.Version = $os.Version
+        $status.OperatingSystem.BuildNumber = $os.BuildNumber
+        $status.OperatingSystem.Architecture = $os.OSArchitecture
+        $status.OperatingSystem.InstallDate = $os.InstallDate
+    }
+} catch {
+    $status.OperatingSystem.Error = $_.Exception.Message
+}
+
 # Check Windows Setup Status
 $status.WindowsSetup = @{}
 try {
@@ -313,6 +328,37 @@ try {
 } catch {
     $status.WindowsSetup.ImageState = "Error: $($_.Exception.Message)"
     $status.WindowsSetup.Status = "Error"
+}
+
+# Collect Operating System Information
+$status.OperatingSystem = @{}
+try {
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os) {
+        $status.OperatingSystem.Caption = $os.Caption
+        $status.OperatingSystem.Version = $os.Version
+        $status.OperatingSystem.BuildNumber = $os.BuildNumber
+        $status.OperatingSystem.Architecture = $os.OSArchitecture
+        $status.OperatingSystem.InstallDate = $os.InstallDate
+    }
+} catch {
+    $status.OperatingSystem.Error = $_.Exception.Message
+}
+
+# Check KB4052623 Installation (SHA-2 Code Signing Support)
+$status.KB4052623 = @{}
+try {
+    $kb = Get-HotFix -Id "KB4052623" -ErrorAction SilentlyContinue
+    if ($kb) {
+        $status.KB4052623.Installed = $true
+        $status.KB4052623.InstalledOn = $kb.InstalledOn
+        $status.KB4052623.Description = $kb.Description
+    } else {
+        $status.KB4052623.Installed = $false
+    }
+} catch {
+    $status.KB4052623.Installed = $false
+    $status.KB4052623.Error = $_.Exception.Message
 }
 
 # Section 3: Collect Extension Info
@@ -358,14 +404,55 @@ $mdeExtInfo = @{
     Name = "MDE.Windows (AzureDefenderForServers)"
     Installed = Test-Path $mdeExtPath
     HandlerState = "Unknown"
+    DetailedStatus = "Unknown"
+    ErrorMessage = ""
+    ErrorCode = ""
 }
 
 if ($mdeExtInfo.Installed) {
+    # Check handler state
     $handlerState = Get-ChildItem -Path "$env:SystemDrive\Packages\Plugins\Microsoft.Azure.AzureDefenderForServers*" -Recurse -Filter "HandlerState.json" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($handlerState) {
         try {
             $state = Get-Content $handlerState.FullName -Raw | ConvertFrom-Json
             $mdeExtInfo.HandlerState = $state.state
+        } catch { }
+    }
+    
+    # Get detailed status from status file
+    $statusFile = Get-ChildItem -Path "$env:SystemDrive\Packages\Plugins\Microsoft.Azure.AzureDefenderForServers*" -Recurse -Filter "*.status" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($statusFile) {
+        try {
+            $statusContent = Get-Content $statusFile.FullName -Raw | ConvertFrom-Json
+            if ($statusContent.status) {
+                $mdeExtInfo.DetailedStatus = $statusContent.status.status
+                if ($statusContent.status.formattedMessage -and $statusContent.status.formattedMessage.message) {
+                    $mdeExtInfo.ErrorMessage = $statusContent.status.formattedMessage.message
+                }
+                if ($statusContent.status.code) {
+                    $mdeExtInfo.ErrorCode = $statusContent.status.code
+                }
+            }
+        } catch { }
+    }
+    
+    # Parse execution log for specific errors
+    $executionLog = Get-ChildItem -Path "$env:SystemDrive\Packages\Plugins\Microsoft.Azure.AzureDefenderForServers*" -Recurse -Filter "*execution*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($executionLog) {
+        try {
+            $logContent = Get-Content $executionLog.FullName -Tail 100 -ErrorAction SilentlyContinue
+            $mdeExtInfo.LogFile = $executionLog.FullName
+            
+            # Check for specific error patterns
+            if ($logContent -match "Unable to connect to the remote server") {
+                $mdeExtInfo.ConnectivityIssue = $true
+            }
+            if ($logContent -match "timeout during updating") {
+                $mdeExtInfo.TimeoutIssue = $true
+            }
+            if ($logContent -match "vNext/Unified agent installation failed") {
+                $mdeExtInfo.InstallationFailed = $true
+            }
         } catch { }
     }
 }
@@ -394,8 +481,97 @@ $status.Extensions += @{
 
 # Section 4: Collect Connectivity Info
 if (Test-Path $azcmagentPath) {
-    $connectivityOutput = & $azcmagentPath check 2>&1 | Out-String
-    $status.Connectivity = $connectivityOutput
+    $connectivityOutput = & $azcmagentPath check 2>&1
+    $status.Connectivity = $connectivityOutput | Out-String
+    
+    # Parse individual endpoint checks
+    $status.ConnectivityChecks = @()
+    foreach ($line in $connectivityOutput) {
+        # Match patterns like "✓ <url>" or "✗ <url>" or "Checking <url>...reachable"
+        if ($line -match "✓.*?(https?://[^\s]+)") {
+            $status.ConnectivityChecks += @{
+                URL = $matches[1]
+                Status = "Passed"
+                Category = "Azure Arc"
+                RawLine = $line.ToString()
+            }
+        } elseif ($line -match "✗.*?(https?://[^\s]+)") {
+            $status.ConnectivityChecks += @{
+                URL = $matches[1]
+                Status = "Failed"
+                Category = "Azure Arc"
+                RawLine = $line.ToString()
+            }
+        } elseif ($line -match "(https?://[^\s]+).*?reachable") {
+            $status.ConnectivityChecks += @{
+                URL = $matches[1]
+                Status = "Passed"
+                Category = "Azure Arc"
+                RawLine = $line.ToString()
+            }
+        } elseif ($line -match "(https?://[^\s]+).*?unreachable") {
+            $status.ConnectivityChecks += @{
+                URL = $matches[1]
+                Status = "Failed"
+                Category = "Azure Arc"
+                RawLine = $line.ToString()
+            }
+        } elseif ($line -match "Passed.*?(https?://[^\s]+)") {
+            $status.ConnectivityChecks += @{
+                URL = $matches[1]
+                Status = "Passed"
+                Category = "Azure Arc"
+                RawLine = $line.ToString()
+            }
+        } elseif ($line -match "Failed.*?(https?://[^\s]+)") {
+            $status.ConnectivityChecks += @{
+                URL = $matches[1]
+                Status = "Failed"
+                Category = "Azure Arc"
+                RawLine = $line.ToString()
+            }
+        }
+    }
+    
+    # Add MDE-specific endpoint checks
+    $mdeEndpoints = @(
+        @{ URL = "go.microsoft.com"; Port = 443; Description = "MDE Installer Download" }
+        # @{ URL = "automatedirstrprdcus.blob.core.windows.net"; Port = 443; Description = "MDE Package Storage (US)" }
+        @{ URL = "automatedirstrprdaue.blob.core.windows.net"; Port = 443; Description = "MDE Package Storage (AU East)" }
+        @{ URL = "automatedirstrprdaus.blob.core.windows.net"; Port = 443; Description = "MDE Package Storage (AU Southeast)" }
+        @{ URL = "ctldl.windowsupdate.com"; Port = 443; Description = "Certificate Trust List" }
+        @{ URL = "win.vortex.data.microsoft.com"; Port = 443; Description = "Windows Telemetry" }
+        @{ URL = "settings-win.data.microsoft.com"; Port = 443; Description = "Windows Settings" }
+        @{ URL = "x.cp.wd.microsoft.com"; Port = 443; Description = "MDE Content Delivery" }
+        @{ URL = "fe3.delivery.mp.microsoft.com"; Port = 443; Description = "Windows Update Delivery" }
+        @{ URL = "winatp-gw-aus.microsoft.com"; Port = 443; Description = "MDE Australia Southeast Gateway" }
+        @{ URL = "winatp-gw-aue.microsoft.com"; Port = 443; Description = "MDE Australia East Gateway" }
+        @{ URL = "winatp-gw-auc.microsoft.com"; Port = 443; Description = "MDE Australia Central Gateway" }
+        @{ URL = "edr-aue.au.endpoint.security.microsoft.com"; Port = 443; Description = "MDE EDR Australia East Endpoint" }
+        # @{ URL = "winatp-gw-eus.microsoft.com"; Port = 443; Description = "MDE East US Gateway" }
+        # @{ URL = "winatp-gw-weu.microsoft.com"; Port = 443; Description = "MDE West Europe Gateway" }
+        @{ URL = "events.data.microsoft.com"; Port = 443; Description = "MDE Telemetry" }
+        @{ URL = "crl.microsoft.com"; Port = 80; Description = "Certificate Revocation List" }
+    )
+    
+    foreach ($endpoint in $mdeEndpoints) {
+        try {
+            $testResult = Test-NetConnection -ComputerName $endpoint.URL -Port $endpoint.Port -WarningAction SilentlyContinue -ErrorAction SilentlyContinue -InformationLevel Quiet
+            $status.ConnectivityChecks += @{
+                URL = "https://$($endpoint.URL):$($endpoint.Port)"
+                Status = if ($testResult) { "Passed" } else { "Failed" }
+                Category = "MDE"
+                Description = $endpoint.Description
+            }
+        } catch {
+            $status.ConnectivityChecks += @{
+                URL = "https://$($endpoint.URL):$($endpoint.Port)"
+                Status = "Failed"
+                Category = "MDE"
+                Description = $endpoint.Description
+            }
+        }
+    }
 }
 
 # ========== REPORT ALL STATUS ==========
@@ -403,6 +579,25 @@ Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "         STATUS REPORT SUMMARY          " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Report 0: Operating System Information
+Write-Host "OPERATING SYSTEM INFORMATION" -ForegroundColor Green
+Write-Host "   ----------------------------------------"
+if ($status.OperatingSystem.Caption) {
+    Write-Host "   OS Name:          $($status.OperatingSystem.Caption)" -ForegroundColor Cyan
+    Write-Host "   OS Version:       $($status.OperatingSystem.Version)" -ForegroundColor Cyan
+    Write-Host "   Build Number:     $($status.OperatingSystem.BuildNumber)" -ForegroundColor Cyan
+    Write-Host "   Architecture:     $($status.OperatingSystem.Architecture)" -ForegroundColor Cyan
+    if ($status.OperatingSystem.InstallDate) {
+        Write-Host "   Install Date:     $($status.OperatingSystem.InstallDate)" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "   Unable to retrieve OS information" -ForegroundColor Yellow
+    if ($status.OperatingSystem.Error) {
+        Write-Host "   Error: $($status.OperatingSystem.Error)" -ForegroundColor Red
+    }
+}
 Write-Host ""
 
 # Report 1: Azure Arc Agent
@@ -510,6 +705,25 @@ if ($status.WindowsSetup.ImageState -and $status.WindowsSetup.ImageState -ne "No
 Write-Host "   Registry Path:    HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ForegroundColor DarkGray
 Write-Host ""
 
+# Report 4.1: KB4052623 Status
+Write-Host "4.1 KB4052623 (SHA-2 CODE SIGNING SUPPORT)" -ForegroundColor Green
+Write-Host "   ----------------------------------------"
+if ($status.KB4052623.Installed) {
+    Write-Host "   KB4052623 Status: INSTALLED" -ForegroundColor Green
+    if ($status.KB4052623.InstalledOn) {
+        Write-Host "   Installed On:     $($status.KB4052623.InstalledOn)" -ForegroundColor Cyan
+    }
+    if ($status.KB4052623.Description) {
+        Write-Host "   Description:      $($status.KB4052623.Description)" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "   KB4052623 Status: NOT INSTALLED" -ForegroundColor Red
+    if ($status.KB4052623.Error) {
+        Write-Host "   Error:            $($status.KB4052623.Error)" -ForegroundColor Yellow
+    }
+}
+Write-Host ""
+
 # Report 5: Extensions
 Write-Host "5. AZURE ARC EXTENSIONS" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
@@ -519,9 +733,35 @@ if ($status.Extensions.Count -gt 0) {
         if ($ext.Installed -ne $null) {
             # Specific extension check
             if ($ext.Installed) {
-                Write-Host "   [$displayName]" -ForegroundColor Green
-                if ($ext.HandlerState) {
+                $extColor = "Green"
+                if ($ext.DetailedStatus -match "error|failed") { $extColor = "Red" }
+                elseif ($ext.DetailedStatus -match "transitioning|warning") { $extColor = "Yellow" }
+                
+                Write-Host "   [$displayName]" -ForegroundColor $extColor
+                
+                if ($ext.DetailedStatus -and $ext.DetailedStatus -ne "Unknown") {
+                    Write-Host "     Status: $($ext.DetailedStatus)" -ForegroundColor $extColor
+                }
+                if ($ext.HandlerState -and $ext.HandlerState -ne "Unknown") {
                     Write-Host "     Handler State: $($ext.HandlerState)" -ForegroundColor $(if ($ext.HandlerState -eq "Enabled") {"Green"} else {"Yellow"})
+                }
+                if ($ext.ErrorCode) {
+                    Write-Host "     Error Code: $($ext.ErrorCode)" -ForegroundColor Red
+                }
+                if ($ext.ErrorMessage) {
+                    Write-Host "     Error: $($ext.ErrorMessage)" -ForegroundColor Red
+                }
+                if ($ext.ConnectivityIssue) {
+                    Write-Host "     Issue Detected: Connectivity problem during installation" -ForegroundColor Yellow
+                }
+                if ($ext.TimeoutIssue) {
+                    Write-Host "     Issue Detected: Timeout downloading updated installer" -ForegroundColor Yellow
+                }
+                if ($ext.InstallationFailed) {
+                    Write-Host "     Issue Detected: MDE agent installation failed" -ForegroundColor Red
+                }
+                if ($ext.LogFile) {
+                    Write-Host "     Log: $($ext.LogFile)" -ForegroundColor DarkGray
                 }
                 if ($ext.ServiceStatus -and $ext.ServiceStatus -ne "N/A") {
                     Write-Host "     Service: $($ext.ServiceStatus)" -ForegroundColor $(if ($ext.ServiceStatus -eq "Running") {"Green"} else {"Red"})
@@ -550,11 +790,64 @@ Write-Host ""
 # Report 6: Connectivity
 Write-Host "6. CONNECTIVITY CHECK" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
-if ($status.Connectivity) {
+if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
+    # Separate Arc and MDE checks
+    $arcChecks = $status.ConnectivityChecks | Where-Object { $_.Category -eq "Azure Arc" }
+    $mdeChecks = $status.ConnectivityChecks | Where-Object { $_.Category -eq "MDE" }
+    
+    $totalPassed = ($status.ConnectivityChecks | Where-Object { $_.Status -eq "Passed" }).Count
+    $totalFailed = ($status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" }).Count
+    
+    Write-Host "   Overall Summary: $totalPassed Passed, $totalFailed Failed" -ForegroundColor $(if ($totalFailed -eq 0) {"Green"} else {"Red"})
+    Write-Host ""
+    
+    # Display Azure Arc endpoints
+    if ($arcChecks.Count -gt 0) {
+        $arcPassed = ($arcChecks | Where-Object { $_.Status -eq "Passed" }).Count
+        $arcFailed = ($arcChecks | Where-Object { $_.Status -eq "Failed" }).Count
+        Write-Host "   Azure Arc Endpoints: $arcPassed Passed, $arcFailed Failed" -ForegroundColor Cyan
+        foreach ($check in $arcChecks) {
+            $statusColor = if ($check.Status -eq "Passed") { "Green" } else { "Red" }
+            $statusIcon = if ($check.Status -eq "Passed") { "✓" } else { "✗" }
+            Write-Host "   [$statusIcon] $($check.Status.PadRight(6)) - $($check.URL)" -ForegroundColor $statusColor
+        }
+        Write-Host ""
+    } else {
+        # If no Arc checks were parsed, show raw output
+        Write-Host "   Azure Arc Endpoints:" -ForegroundColor Cyan
+        Write-Host "   (Unable to parse azcmagent check output - showing raw results)" -ForegroundColor Yellow
+        if ($status.Connectivity) {
+            $status.Connectivity -split "`n" | ForEach-Object {
+                if ($_ -match "✓|Passed|reachable|succeeded") {
+                    Write-Host "   $_" -ForegroundColor Green
+                } elseif ($_ -match "✗|Failed|unreachable|error") {
+                    Write-Host "   $_" -ForegroundColor Red
+                } elseif ($_ -match "https?://") {
+                    Write-Host "   $_" -ForegroundColor Gray
+                }
+            }
+        }
+        Write-Host ""
+    }
+    
+    # Display MDE endpoints
+    if ($mdeChecks.Count -gt 0) {
+        $mdePassed = ($mdeChecks | Where-Object { $_.Status -eq "Passed" }).Count
+        $mdeFailed = ($mdeChecks | Where-Object { $_.Status -eq "Failed" }).Count
+        Write-Host "   MDE Endpoints: $mdePassed Passed, $mdeFailed Failed" -ForegroundColor Cyan
+        foreach ($check in $mdeChecks) {
+            $statusColor = if ($check.Status -eq "Passed") { "Green" } else { "Red" }
+            $statusIcon = if ($check.Status -eq "Passed") { "✓" } else { "✗" }
+            $description = if ($check.Description) { " ($($check.Description))" } else { "" }
+            Write-Host "   [$statusIcon] $($check.Status.PadRight(6)) - $($check.URL)$description" -ForegroundColor $statusColor
+        }
+    }
+} elseif ($status.Connectivity) {
+    Write-Host "   Full Output:" -ForegroundColor Cyan
     $status.Connectivity -split "`n" | ForEach-Object {
-        if ($_ -match "Passed|✓|succeeded") {
+        if ($_ -match "✓|Passed|succeeded|reachable") {
             Write-Host "   $_" -ForegroundColor Green
-        } elseif ($_ -match "Failed|✗|error") {
+        } elseif ($_ -match "✗|Failed|error|unreachable") {
             Write-Host "   $_" -ForegroundColor Red
         } else {
             Write-Host "   $_"
@@ -632,6 +925,49 @@ if ($status.ArcAgent.DependentServices.extensionservice -and $status.ArcAgent.De
     $issuesFound = $true
 }
 
+# Check connectivity failures
+if ($status.ConnectivityChecks) {
+    # Check Azure Arc connectivity failures
+    $failedArcConnectivity = $status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" -and $_.Category -eq "Azure Arc" }
+    if ($failedArcConnectivity.Count -gt 0) {
+        Write-Host "[CRITICAL] $($failedArcConnectivity.Count) Azure Arc connectivity check(s) failed" -ForegroundColor Red
+        Write-Host "           Failed Azure Arc endpoints:" -ForegroundColor Red
+        foreach ($failed in $failedArcConnectivity) {
+            Write-Host "           - $($failed.URL)" -ForegroundColor Red
+        }
+        Write-Host "           Issue: Unable to reach required Azure Arc endpoints" -ForegroundColor Red
+        Write-Host "           Action: Verify firewall rules and proxy configuration" -ForegroundColor Yellow
+        Write-Host "                   Check DNS resolution for failed endpoints" -ForegroundColor Yellow
+        Write-Host "                   Ensure outbound HTTPS (443) is allowed" -ForegroundColor Yellow
+        $issuesFound = $true
+    }
+    
+    # Check MDE connectivity failures
+    $failedMDEConnectivity = $status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" -and $_.Category -eq "MDE" }
+    if ($failedMDEConnectivity.Count -gt 0) {
+        Write-Host "[CRITICAL] $($failedMDEConnectivity.Count) MDE connectivity check(s) failed" -ForegroundColor Red
+        Write-Host "           Failed MDE endpoints:" -ForegroundColor Red
+        foreach ($failed in $failedMDEConnectivity) {
+            $desc = if ($failed.Description) { " - $($failed.Description)" } else { "" }
+            Write-Host "           - $($failed.URL)$desc" -ForegroundColor Red
+        }
+        Write-Host "           Issue: Unable to reach MDE endpoints - Extension installation/updates will fail" -ForegroundColor Red
+        Write-Host "           Root Cause: Network connectivity or firewall blocking MDE traffic" -ForegroundColor Red
+        Write-Host "           Action: Verify firewall allows access to MDE endpoints" -ForegroundColor Yellow
+        Write-Host "                   Required MDE URLs:" -ForegroundColor Yellow
+        Write-Host "                   - *.blob.core.windows.net" -ForegroundColor Gray
+        Write-Host "                   - go.microsoft.com" -ForegroundColor Gray
+        Write-Host "                   - *.wd.microsoft.com" -ForegroundColor Gray
+        Write-Host "                   - winatp-gw-*.microsoft.com (aus, aue, auc, eus, weu)" -ForegroundColor Gray
+        Write-Host "                   - edr-*.endpoint.security.microsoft.com" -ForegroundColor Gray
+        Write-Host "                   - events.data.microsoft.com" -ForegroundColor Gray
+        Write-Host "                   - crl.microsoft.com" -ForegroundColor Gray
+        Write-Host "                   Check DNS resolution: Resolve-DnsName <endpoint>" -ForegroundColor Yellow
+        Write-Host "                   Test connectivity: Test-NetConnection -ComputerName <endpoint> -Port 443" -ForegroundColor Yellow
+        $issuesFound = $true
+    }
+}
+
 if ($status.ArcAgent.DependentServices.gcarcservice -and $status.ArcAgent.DependentServices.gcarcservice -ne "running") {
     Write-Host "[CRITICAL] GC Arc Service is not running (Status: $($status.ArcAgent.DependentServices.gcarcservice))" -ForegroundColor Red
     Write-Host "           Action: Restart the service with: Restart-Service gcarcservice" -ForegroundColor Yellow
@@ -667,7 +1003,72 @@ if ($status.MDE.SenseService -ne "Running" -and $status.MDE.SenseService -ne "No
     $issuesFound = $true
 }
 
-$failedExtensions = $status.Extensions | Where-Object { $_.Status -match "error|failed" }
+# Check for MDE extension specific issues
+$mdeExt = $status.Extensions | Where-Object { $_.Name -match "MDE.Windows" }
+if ($mdeExt) {
+    $hasMDEIssue = $false
+    
+    # Check multiple indicators of failure
+    if ($mdeExt.DetailedStatus -match "(?i)error|failed|transitioning") { $hasMDEIssue = $true }
+    if ($mdeExt.InstallationFailed) { $hasMDEIssue = $true }
+    if ($mdeExt.ConnectivityIssue) { $hasMDEIssue = $true }
+    if ($mdeExt.ErrorMessage -and $mdeExt.ErrorMessage -ne "") { $hasMDEIssue = $true }
+    if ($mdeExt.ErrorCode -and $mdeExt.ErrorCode -ne "" -and $mdeExt.ErrorCode -ne 0) { $hasMDEIssue = $true }
+    
+    if ($hasMDEIssue) {
+        Write-Host "[CRITICAL] MDE Extension installation/configuration failed" -ForegroundColor Red
+        if ($mdeExt.DetailedStatus -and $mdeExt.DetailedStatus -ne "Unknown") {
+            Write-Host "           Status: $($mdeExt.DetailedStatus)" -ForegroundColor Red
+        }
+        if ($mdeExt.ErrorCode) {
+            Write-Host "           Error Code: $($mdeExt.ErrorCode)" -ForegroundColor Red
+        }
+        if ($mdeExt.ErrorMessage) {
+            Write-Host "           Error: $($mdeExt.ErrorMessage)" -ForegroundColor Red
+        }
+        
+        if ($mdeExt.ConnectivityIssue) {
+            Write-Host "           Root Cause: Unable to connect to MDE download servers" -ForegroundColor Red
+            Write-Host "           Symptoms: 'Unable to connect to the remote server' in logs" -ForegroundColor Yellow
+            Write-Host "" 
+            Write-Host "           Troubleshooting Steps:" -ForegroundColor Cyan
+            Write-Host "           1. Verify internet connectivity to Microsoft endpoints" -ForegroundColor Yellow
+            Write-Host "              Test: Test-NetConnection -ComputerName go.microsoft.com -Port 443" -ForegroundColor Gray
+            Write-Host "           2. Check proxy configuration if applicable" -ForegroundColor Yellow
+            Write-Host "              Get proxy: netsh winhttp show proxy" -ForegroundColor Gray
+            Write-Host "           3. Verify firewall rules allow outbound HTTPS (443)" -ForegroundColor Yellow
+            Write-Host "           4. Required URLs for MDE:" -ForegroundColor Yellow
+            Write-Host "              - *.blob.core.windows.net" -ForegroundColor Gray
+            Write-Host "              - go.microsoft.com" -ForegroundColor Gray
+            Write-Host "              - *.wd.microsoft.com" -ForegroundColor Gray
+            Write-Host "              - winatp-gw-*.microsoft.com (aus, aue, auc, eus, weu)" -ForegroundColor Gray
+            Write-Host "              - edr-*.endpoint.security.microsoft.com" -ForegroundColor Gray
+            Write-Host "           5. Check DNS resolution" -ForegroundColor Yellow
+            Write-Host "              Test: Resolve-DnsName go.microsoft.com" -ForegroundColor Gray
+            Write-Host "" 
+            Write-Host "           Action: After fixing connectivity, retry extension:" -ForegroundColor Yellow
+            Write-Host "                   - Remove extension from Azure Portal" -ForegroundColor Cyan
+            Write-Host "                   - Wait 5 minutes for cleanup" -ForegroundColor Cyan
+            Write-Host "                   - Re-add MDE.Windows extension" -ForegroundColor Cyan
+        } elseif ($mdeExt.TimeoutIssue) {
+            Write-Host "           Root Cause: Timeout downloading MDE installer (md4ws.msi)" -ForegroundColor Red
+            Write-Host "           Action: Check network bandwidth and latency to Azure endpoints" -ForegroundColor Yellow
+            Write-Host "                   Test: Test-NetConnection -ComputerName go.microsoft.com -Port 443" -ForegroundColor Gray
+        } else {
+            Write-Host "           Action: Check detailed logs in extension directory" -ForegroundColor Yellow
+            if ($mdeExt.LogFile) {
+                Write-Host "                   Log File: $($mdeExt.LogFile)" -ForegroundColor Gray
+            } else {
+                Write-Host "                   Log Path: C:\Packages\Plugins\Microsoft.Azure.AzureDefenderForServers*\" -ForegroundColor Gray
+            }
+        }
+        $issuesFound = $true
+        Write-Host ""
+    }
+}
+
+# Check for other extension failures
+$failedExtensions = $status.Extensions | Where-Object { ($_.Status -match "(?i)error|failed") -and ($_.Name -notmatch "MDE.Windows") }
 if ($failedExtensions.Count -gt 0) {
     Write-Host "[WARNING] $($failedExtensions.Count) extension(s) have errors" -ForegroundColor Yellow
     foreach ($ext in $failedExtensions) {
@@ -680,6 +1081,42 @@ if ($failedExtensions.Count -gt 0) {
     $issuesFound = $true
 }
 
+# Check MDE connectivity prerequisites when extension is not installed
+$mdeExtCheck = $status.Extensions | Where-Object { $_.Name -match "MDE.Windows" }
+if ($mdeExtCheck -and -not $mdeExtCheck.Installed) {
+    # Check if MDE connectivity tests were performed
+    $mdeConnectivityTests = $status.ConnectivityChecks | Where-Object { $_.Category -eq "MDE" }
+    if ($mdeConnectivityTests -and $mdeConnectivityTests.Count -gt 0) {
+        $failedMDEPrereqs = $mdeConnectivityTests | Where-Object { $_.Status -eq "Failed" }
+        
+        if ($failedMDEPrereqs.Count -gt 0) {
+            Write-Host "[WARNING] MDE.Windows extension not installed - Connectivity prerequisites NOT met" -ForegroundColor Yellow
+            Write-Host "          Failed connectivity checks: $($failedMDEPrereqs.Count) of $($mdeConnectivityTests.Count)" -ForegroundColor Yellow
+            Write-Host "          Failed endpoints:" -ForegroundColor Yellow
+            foreach ($failed in $failedMDEPrereqs) {
+                $desc = if ($failed.Description) { " - $($failed.Description)" } else { "" }
+                Write-Host "          - $($failed.URL)$desc" -ForegroundColor Red
+            }
+            Write-Host "          Issue: Cannot install MDE extension until connectivity is established" -ForegroundColor Red
+            Write-Host "          Action: Fix firewall/proxy to allow access to these endpoints before installing extension" -ForegroundColor Yellow
+            Write-Host "                  Required MDE URLs:" -ForegroundColor Yellow
+            Write-Host "                  - *.blob.core.windows.net" -ForegroundColor Gray
+            Write-Host "                  - go.microsoft.com" -ForegroundColor Gray
+            Write-Host "                  - *.wd.microsoft.com" -ForegroundColor Gray
+            Write-Host "                  - winatp-gw-*.microsoft.com (aus, aue, auc, eus, weu)" -ForegroundColor Gray
+            Write-Host "                  - edr-*.endpoint.security.microsoft.com" -ForegroundColor Gray
+            Write-Host "                  - events.data.microsoft.com" -ForegroundColor Gray
+            Write-Host "                  - crl.microsoft.com" -ForegroundColor Gray
+            $issuesFound = $true
+        } else {
+            Write-Host "[INFO] MDE.Windows extension not installed - Connectivity prerequisites VERIFIED" -ForegroundColor Cyan
+            Write-Host "       All $($mdeConnectivityTests.Count) MDE endpoint connectivity checks passed" -ForegroundColor Green
+            Write-Host "       Server is ready for MDE extension installation" -ForegroundColor Green
+        }
+        Write-Host ""
+    }
+}
+
 # Check for incorrect Organization ID
 if ($status.MDE.OrgId -and $status.MDE.OrgId -ne "Not Available" -and $status.MDE.OrgId -ne "Error") {
     if ($status.MDE.OrgId -ne $ExpectedOrgId) {
@@ -687,6 +1124,29 @@ if ($status.MDE.OrgId -and $status.MDE.OrgId -ne "Not Available" -and $status.MD
         Write-Host "           Expected: $ExpectedOrgId" -ForegroundColor Red
         Write-Host "           Found:    $($status.MDE.OrgId)" -ForegroundColor Red
         Write-Host "           Action: Server is onboarded to wrong organization - re-onboard required" -ForegroundColor Yellow
+        $issuesFound = $true
+    }
+}
+
+# Check KB4052623 Installation
+if (-not $status.KB4052623.Installed) {
+    $osVersion = [Environment]::OSVersion.Version
+    $isServer2012R2 = ($osVersion.Major -eq 6 -and $osVersion.Minor -eq 3)
+    $isServer2012 = ($osVersion.Major -eq 6 -and $osVersion.Minor -eq 2)
+    
+    if ($isServer2012R2 -or $isServer2012) {
+        Write-Host "[CRITICAL] KB4052623 is not installed" -ForegroundColor Red
+        Write-Host "           Issue: SHA-2 code signing support update is missing" -ForegroundColor Red
+        Write-Host "           Impact: Required for modern Azure Arc agent and MDE extension installation" -ForegroundColor Red
+        Write-Host "           OS Detected: Windows Server $(if ($isServer2012R2) {'2012 R2'} else {'2012'})" -ForegroundColor Yellow
+        Write-Host "           Action: Install KB4052623 from Windows Update or download manually" -ForegroundColor Yellow
+        Write-Host "                   Download: https://support.microsoft.com/help/4052623" -ForegroundColor Cyan
+        Write-Host "                   This update enables SHA-2 code signing support required for security updates" -ForegroundColor Gray
+        $issuesFound = $true
+    } elseif ($osVersion.Major -eq 6) {
+        Write-Host "[WARNING] KB4052623 is not installed" -ForegroundColor Yellow
+        Write-Host "          Note: This update may be required for older Windows Server versions" -ForegroundColor Yellow
+        Write-Host "          Action: Consider installing KB4052623 if experiencing certificate validation issues" -ForegroundColor Yellow
         $issuesFound = $true
     }
 }
