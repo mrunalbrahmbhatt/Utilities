@@ -2,8 +2,8 @@
 # Compatible: Windows Server 2012 R2 to 2025
 # Run as Administrator
 #
-# Usage: .\ARCCheck.ps1 -ExpectedOrgId "<MDE_ORG_ID>"
-# Example: .\ARCCheck.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
+# Usage: .\ValidateArcps1 -ExpectedOrgId "<MDE_ORG_ID>"
+# Example: .\ValidateArcps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
 
 <#
 .SYNOPSIS
@@ -23,11 +23,8 @@
     If the detected OrgId doesn't match this value, a CRITICAL alert will be raised.
 
 .EXAMPLE
-    .\ARCCheck.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
+    .\ValidateArcps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
 
-.NOTES
-    Requires: Administrator privileges
-    For help: Get-Help .\ARCCheck.ps1 -Full
 #>
 
 param(
