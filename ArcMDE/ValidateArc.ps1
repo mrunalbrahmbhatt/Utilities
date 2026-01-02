@@ -2,8 +2,8 @@
 # Compatible: Windows Server 2012 R2 to 2025
 # Run as Administrator
 #
-# Usage: .\ValidateArcps1 -ExpectedOrgId "<MDE_ORG_ID>"
-# Example: .\ValidateArcps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
+# Usage: .\ValidateARC.ps1 -ExpectedOrgId "<MDE_ORG_ID>"
+# Example: .\ValidateARC.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
 
 <#
 .SYNOPSIS
@@ -23,8 +23,7 @@
     If the detected OrgId doesn't match this value, a CRITICAL alert will be raised.
 
 .EXAMPLE
-    .\ValidateArcps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
-
+    .\ValidateARC.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
 #>
 
 param(
@@ -477,12 +476,14 @@ $status.Extensions += @{
 }
 
 # Section 4: Collect Connectivity Info
+$status.ConnectivityChecks = @()
+
+# Check Azure Arc connectivity (only if agent is installed)
 if (Test-Path $azcmagentPath) {
     $connectivityOutput = & $azcmagentPath check 2>&1
     $status.Connectivity = $connectivityOutput | Out-String
     
     # Parse individual endpoint checks
-    $status.ConnectivityChecks = @()
     foreach ($line in $connectivityOutput) {
         # Match patterns like "✓ <url>" or "✗ <url>" or "Checking <url>...reachable"
         if ($line -match "✓.*?(https?://[^\s]+)") {
@@ -529,9 +530,10 @@ if (Test-Path $azcmagentPath) {
             }
         }
     }
-    
-    # Add MDE-specific endpoint checks
-    $mdeEndpoints = @(
+}
+
+# Add MDE-specific endpoint checks (run regardless of Arc agent installation)
+$mdeEndpoints = @(
         @{ URL = "go.microsoft.com"; Port = 443; Description = "MDE Installer Download" }
         # @{ URL = "automatedirstrprdcus.blob.core.windows.net"; Port = 443; Description = "MDE Package Storage (US)" }
         @{ URL = "automatedirstrprdaue.blob.core.windows.net"; Port = 443; Description = "MDE Package Storage (AU East)" }
@@ -569,7 +571,6 @@ if (Test-Path $azcmagentPath) {
             }
         }
     }
-}
 
 # ========== REPORT ALL STATUS ==========
 Write-Host ""
@@ -951,14 +952,17 @@ if ($status.ConnectivityChecks) {
         Write-Host "           Issue: Unable to reach MDE endpoints - Extension installation/updates will fail" -ForegroundColor Red
         Write-Host "           Root Cause: Network connectivity or firewall blocking MDE traffic" -ForegroundColor Red
         Write-Host "           Action: Verify firewall allows access to MDE endpoints" -ForegroundColor Yellow
-        Write-Host "                   Required MDE URLs:" -ForegroundColor Yellow
-        Write-Host "                   - *.blob.core.windows.net" -ForegroundColor Gray
-        Write-Host "                   - go.microsoft.com" -ForegroundColor Gray
-        Write-Host "                   - *.wd.microsoft.com" -ForegroundColor Gray
-        Write-Host "                   - winatp-gw-*.microsoft.com (aus, aue, auc, eus, weu)" -ForegroundColor Gray
-        Write-Host "                   - edr-*.endpoint.security.microsoft.com" -ForegroundColor Gray
-        Write-Host "                   - events.data.microsoft.com" -ForegroundColor Gray
-        Write-Host "                   - crl.microsoft.com" -ForegroundColor Gray
+        Write-Host "                   Required MDE URLs (see failed endpoints above for specifics):" -ForegroundColor Yellow
+        Write-Host "                   - *.blob.core.windows.net:443 (MDE Package Storage)" -ForegroundColor Gray
+        Write-Host "                   - go.microsoft.com:443 (MDE Installer)" -ForegroundColor Gray
+        Write-Host "                   - *.wd.microsoft.com:443 (Content Delivery)" -ForegroundColor Gray
+        Write-Host "                   - winatp-gw-*.microsoft.com:443 (Regional Gateways: aus, aue, auc)" -ForegroundColor Gray
+        Write-Host "                   - edr-*.endpoint.security.microsoft.com:443 (EDR Endpoints)" -ForegroundColor Gray
+        Write-Host "                   - events.data.microsoft.com:443 (Telemetry)" -ForegroundColor Gray
+        Write-Host "                   - ctldl.windowsupdate.com:443 (Certificate Trust List)" -ForegroundColor Gray
+        Write-Host "                   - crl.microsoft.com:80 (Certificate Revocation List)" -ForegroundColor Gray
+        Write-Host "                   - *.data.microsoft.com:443 (Windows Telemetry/Settings)" -ForegroundColor Gray
+        Write-Host "                   - *.delivery.mp.microsoft.com:443 (Windows Update)" -ForegroundColor Gray
         Write-Host "                   Check DNS resolution: Resolve-DnsName <endpoint>" -ForegroundColor Yellow
         Write-Host "                   Test connectivity: Test-NetConnection -ComputerName <endpoint> -Port 443" -ForegroundColor Yellow
         $issuesFound = $true
@@ -1096,14 +1100,17 @@ if ($mdeExtCheck -and -not $mdeExtCheck.Installed) {
             }
             Write-Host "          Issue: Cannot install MDE extension until connectivity is established" -ForegroundColor Red
             Write-Host "          Action: Fix firewall/proxy to allow access to these endpoints before installing extension" -ForegroundColor Yellow
-            Write-Host "                  Required MDE URLs:" -ForegroundColor Yellow
-            Write-Host "                  - *.blob.core.windows.net" -ForegroundColor Gray
-            Write-Host "                  - go.microsoft.com" -ForegroundColor Gray
-            Write-Host "                  - *.wd.microsoft.com" -ForegroundColor Gray
-            Write-Host "                  - winatp-gw-*.microsoft.com (aus, aue, auc, eus, weu)" -ForegroundColor Gray
-            Write-Host "                  - edr-*.endpoint.security.microsoft.com" -ForegroundColor Gray
-            Write-Host "                  - events.data.microsoft.com" -ForegroundColor Gray
-            Write-Host "                  - crl.microsoft.com" -ForegroundColor Gray
+            Write-Host "                  Required MDE URLs (see failed endpoints above for specifics):" -ForegroundColor Yellow
+            Write-Host "                  - *.blob.core.windows.net:443 (MDE Package Storage)" -ForegroundColor Gray
+            Write-Host "                  - go.microsoft.com:443 (MDE Installer)" -ForegroundColor Gray
+            Write-Host "                  - *.wd.microsoft.com:443 (Content Delivery)" -ForegroundColor Gray
+            Write-Host "                  - winatp-gw-*.microsoft.com:443 (Regional Gateways: aus, aue, auc)" -ForegroundColor Gray
+            Write-Host "                  - edr-*.endpoint.security.microsoft.com:443 (EDR Endpoints)" -ForegroundColor Gray
+            Write-Host "                  - events.data.microsoft.com:443 (Telemetry)" -ForegroundColor Gray
+            Write-Host "                  - ctldl.windowsupdate.com:443 (Certificate Trust List)" -ForegroundColor Gray
+            Write-Host "                  - crl.microsoft.com:80 (Certificate Revocation List)" -ForegroundColor Gray
+            Write-Host "                  - *.data.microsoft.com:443 (Windows Telemetry/Settings)" -ForegroundColor Gray
+            Write-Host "                  - *.delivery.mp.microsoft.com:443 (Windows Update)" -ForegroundColor Gray
             $issuesFound = $true
         } else {
             Write-Host "[INFO] MDE.Windows extension not installed - Connectivity prerequisites VERIFIED" -ForegroundColor Cyan
