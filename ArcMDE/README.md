@@ -1,4 +1,4 @@
-# ValidateARC.ps1 - Azure Arc Health Check Script
+# ValidateARC.ps1 - Azure Arc & MDE Health Check Script
 
 ## Overview
 
