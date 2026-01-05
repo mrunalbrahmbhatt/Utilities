@@ -2,9 +2,9 @@
 # Compatible: Windows Server 2012 R2 to 2025
 # Run as Administrator
 #
-# Usage: .\ValidateARC.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"]
-# Example: .\ValidateARC.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
-# Example: .\ValidateARC.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9" -Region "US"
+# Usage: .\ValidateArcMDE.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"]
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9" -Region "US"
 
 <#
 .SYNOPSIS
@@ -29,10 +29,10 @@
     This filters region-specific endpoints (blob storage, gateways, EDR).
 
 .EXAMPLE
-    .\ValidateARC.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    .\ValidateArcMDE.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     
 .EXAMPLE
-    .\ValidateARC.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -Region "US"
+    .\ValidateArcMDE.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -Region "US"
 
 .NOTES
     MDE Connectivity Model:
