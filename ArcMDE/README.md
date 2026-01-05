@@ -4,7 +4,7 @@ Comprehensive health check script for Azure Arc-enabled servers with Microsoft D
 
 ## Overview
 
-`ValidateARC.ps1` performs detailed validation of Azure Arc-enabled servers including:
+`ValidateArcMDE.ps1` performs detailed validation of Azure Arc-enabled servers including:
 - Azure Arc Agent status and heartbeat monitoring
 - Managed Identity certificate validation
 - Microsoft Defender for Endpoint onboarding verification
@@ -45,19 +45,19 @@ Azure region for MDE connectivity checks. Determines which regional endpoints to
 
 ### Basic Usage
 ```powershell
-.\ValidateARC.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+.\ValidateArcMDE.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 ```
 
 ### Specify Region
 ```powershell
-.\ValidateARC.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -Region "US"
+.\ValidateArcMDE.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -Region "US"
 ```
 
 ### Run with Elevated Permissions
 ```powershell
 # Right-click PowerShell and "Run as Administrator"
 cd C:\Tools
-.\ValidateARC.ps1 -ExpectedOrgId "your-org-id-here"
+.\ValidateArcMDE.ps1 -ExpectedOrgId "your-org-id-here"
 ```
 
 ## Features
