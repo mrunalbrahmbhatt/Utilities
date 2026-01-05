@@ -29,10 +29,10 @@
     This filters region-specific endpoints (blob storage, gateways, EDR).
 
 .EXAMPLE
-    .\ValidateARC.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
+    .\ValidateARC.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     
 .EXAMPLE
-    .\ValidateARC.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9" -Region "US"
+    .\ValidateARC.ps1 -ExpectedOrgId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -Region "US"
 
 .NOTES
     MDE Connectivity Model:
@@ -451,6 +451,178 @@ if ($onboardingState -ne "Onboarded") {
 }
 
 $status.MDE.OnboardingState = $onboardingState
+
+# ========== ADDITIONAL MDE ONBOARDING VALIDATION CHECKS (per Microsoft Documentation) ==========
+
+# 1. Check DiagTrack Service (Windows Diagnostic Data Service)
+$status.MDE.DiagTrackService = @{
+    Status = "Unknown"
+    StartType = "Unknown"
+    Issue = $null
+}
+try {
+    $diagTrackSvc = Get-Service -Name "DiagTrack" -ErrorAction SilentlyContinue
+    if ($diagTrackSvc) {
+        $status.MDE.DiagTrackService.Status = $diagTrackSvc.Status.ToString()
+        $status.MDE.DiagTrackService.StartType = $diagTrackSvc.StartType.ToString()
+        
+        if ($diagTrackSvc.StartType -ne "Automatic") {
+            $status.MDE.DiagTrackService.Issue = "Not set to Automatic start"
+        }
+        if ($diagTrackSvc.Status -ne "Running") {
+            $status.MDE.DiagTrackService.Issue = "Service not running"
+        }
+    } else {
+        $status.MDE.DiagTrackService.Status = "Not Found"
+    }
+} catch {
+    $status.MDE.DiagTrackService.Status = "Error"
+    $status.MDE.DiagTrackService.Issue = $_.Exception.Message
+}
+
+# 2. Check Windows Defender ELAM Driver Status
+$status.MDE.ELAMDriver = @{
+    DisableAntiSpyware = "Not Set"
+    DisableAntiVirus = "Not Set"
+    Issue = $null
+}
+try {
+    $wdPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
+    if (Test-Path $wdPolicyPath) {
+        $wdPolicy = Get-ItemProperty -Path $wdPolicyPath -ErrorAction SilentlyContinue
+        
+        if ($wdPolicy.PSObject.Properties.Name -contains "DisableAntiSpyware") {
+            $status.MDE.ELAMDriver.DisableAntiSpyware = $wdPolicy.DisableAntiSpyware
+            if ($wdPolicy.DisableAntiSpyware -eq 1) {
+                $status.MDE.ELAMDriver.Issue = "ELAM driver disabled by policy (DisableAntiSpyware=1)"
+            }
+        }
+        
+        if ($wdPolicy.PSObject.Properties.Name -contains "DisableAntiVirus") {
+            $status.MDE.ELAMDriver.DisableAntiVirus = $wdPolicy.DisableAntiVirus
+            if ($wdPolicy.DisableAntiVirus -eq 1) {
+                $status.MDE.ELAMDriver.Issue = "ELAM driver disabled by policy (DisableAntiVirus=1)"
+            }
+        }
+    }
+} catch {
+    $status.MDE.ELAMDriver.Issue = "Error checking ELAM driver: $($_.Exception.Message)"
+}
+
+# 3. Check Windows Defender Core Services
+$status.MDE.DefenderServices = @{}
+$defenderServices = @("WdBoot", "WdFilter", "WdNisDrv", "WdNisSvc", "WinDefend")
+foreach ($svcName in $defenderServices) {
+    try {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($svc) {
+            $status.MDE.DefenderServices[$svcName] = @{
+                Status = $svc.Status.ToString()
+                StartType = $svc.StartType.ToString()
+            }
+        } else {
+            $status.MDE.DefenderServices[$svcName] = @{ Status = "Not Found" }
+        }
+    } catch {
+        $status.MDE.DefenderServices[$svcName] = @{ Status = "Error" }
+    }
+}
+
+# 4. Check SENSE Feature on Demand (FoD)
+$status.MDE.SenseFoD = @{
+    Installed = "Unknown"
+    Output = ""
+}
+try {
+    $dismOutput = & DISM.EXE /Online /Get-CapabilityInfo /CapabilityName:Microsoft.Windows.Sense.Client~~~~ 2>&1
+    $status.MDE.SenseFoD.Output = $dismOutput -join "`n"
+    
+    if ($dismOutput -match "State\s*:\s*Installed") {
+        $status.MDE.SenseFoD.Installed = "Yes"
+    } elseif ($dismOutput -match "State\s*:\s*Not Present") {
+        $status.MDE.SenseFoD.Installed = "No"
+    } else {
+        $status.MDE.SenseFoD.Installed = "Unknown"
+    }
+} catch {
+    $status.MDE.SenseFoD.Installed = "Error"
+    $status.MDE.SenseFoD.Output = $_.Exception.Message
+}
+
+# 5. Check MDE Registry Permissions & Status Key
+$status.MDE.RegistryHealth = @{
+    PolicyKeyExists = $false
+    StatusKeyExists = $false
+    OnboardingStateValue = $null
+    Issue = $null
+}
+try {
+    # Check Policy key
+    $policyKeyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Advanced Threat Protection"
+    $status.MDE.RegistryHealth.PolicyKeyExists = Test-Path $policyKeyPath
+    
+    # Check Status key
+    $statusKeyPath = "HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status"
+    $status.MDE.RegistryHealth.StatusKeyExists = Test-Path $statusKeyPath
+    
+    if ($status.MDE.RegistryHealth.StatusKeyExists) {
+        $statusKey = Get-ItemProperty -Path $statusKeyPath -ErrorAction SilentlyContinue
+        if ($statusKey.PSObject.Properties.Name -contains "OnboardingState") {
+            $status.MDE.RegistryHealth.OnboardingStateValue = $statusKey.OnboardingState
+        }
+    }
+    
+    # Check if Policy key exists but Status key doesn't (indicates onboarding issue)
+    if ($status.MDE.RegistryHealth.PolicyKeyExists -and -not $status.MDE.RegistryHealth.StatusKeyExists) {
+        $status.MDE.RegistryHealth.Issue = "Policy key exists but Status key missing - SENSE service may not have started successfully"
+    }
+} catch {
+    $status.MDE.RegistryHealth.Issue = "Error checking registry: $($_.Exception.Message)"
+}
+
+# 6. Check SENSE Event Log for Critical Errors
+$status.MDE.EventLogErrors = @{
+    CriticalErrors = @()
+    RecentErrorCount = 0
+}
+try {
+    $senseLog = Get-WinEvent -LogName "Microsoft-Windows-SENSE/Operational" -MaxEvents 100 -ErrorAction SilentlyContinue | 
+        Where-Object { $_.Level -le 3 -and $_.TimeCreated -gt (Get-Date).AddHours(-24) }
+    
+    if ($senseLog) {
+        $status.MDE.EventLogErrors.RecentErrorCount = $senseLog.Count
+        
+        # Capture specific critical event IDs from Microsoft documentation
+        $criticalEventIds = @(5, 6, 7, 9, 10, 15, 17, 25, 27, 29, 30, 32, 55, 63, 64, 68, 69)
+        $criticalEvents = $senseLog | Where-Object { $_.Id -in $criticalEventIds }
+        
+        foreach ($event in $criticalEvents | Select-Object -First 5) {
+            $status.MDE.EventLogErrors.CriticalErrors += @{
+                EventId = $event.Id
+                Message = $event.Message
+                TimeCreated = $event.TimeCreated
+            }
+        }
+    }
+} catch {
+    $status.MDE.EventLogErrors.RecentErrorCount = "Error: $($_.Exception.Message)"
+}
+
+# 7. Check Connected User Experiences and Telemetry Service
+$status.MDE.TelemetryService = @{
+    Status = "Unknown"
+    StartType = "Unknown"
+}
+try {
+    # This service location should be properly configured by MDE
+    $telemetrySvc = Get-Service -Name "DiagTrack" -ErrorAction SilentlyContinue
+    if ($telemetrySvc) {
+        $status.MDE.TelemetryService.Status = $telemetrySvc.Status.ToString()
+        $status.MDE.TelemetryService.StartType = $telemetrySvc.StartType.ToString()
+    }
+} catch {
+    $status.MDE.TelemetryService.Status = "Error"
+}
 
 # Analyze MDE version age (Platform version format: 4.18.YYMDD.revision)
 $status.MDE.VersionAge = "Unknown"
@@ -1508,6 +1680,78 @@ if ($healthPercentage -ge 90) {
 }
 Write-Host ""
 
+# Report 3.2: Additional MDE Onboarding Validation (Microsoft Documentation Checks)
+Write-Host "3.2 ADDITIONAL MDE ONBOARDING VALIDATION" -ForegroundColor Green
+Write-Host "   ----------------------------------------"
+
+# DiagTrack Service Check
+Write-Host "   DiagTrack Service (Windows Diagnostic Data):" -ForegroundColor Cyan
+Write-Host "     Status:      $($status.MDE.DiagTrackService.Status)" -ForegroundColor $(if ($status.MDE.DiagTrackService.Status -eq "Running") {"Green"} else {"Yellow"})
+Write-Host "     Start Type:  $($status.MDE.DiagTrackService.StartType)" -ForegroundColor $(if ($status.MDE.DiagTrackService.StartType -eq "Automatic") {"Green"} else {"Yellow"})
+if ($status.MDE.DiagTrackService.Issue) {
+    Write-Host "     Issue:       $($status.MDE.DiagTrackService.Issue)" -ForegroundColor Yellow
+    Write-Host "     Action:      sc config diagtrack start=auto && sc start diagtrack" -ForegroundColor Gray
+}
+Write-Host ""
+
+# ELAM Driver Check
+Write-Host "   Windows Defender ELAM Driver:" -ForegroundColor Cyan
+Write-Host "     DisableAntiSpyware: $($status.MDE.ELAMDriver.DisableAntiSpyware)" -ForegroundColor $(if ($status.MDE.ELAMDriver.DisableAntiSpyware -eq 1) {"Red"} else {"Green"})
+Write-Host "     DisableAntiVirus:   $($status.MDE.ELAMDriver.DisableAntiVirus)" -ForegroundColor $(if ($status.MDE.ELAMDriver.DisableAntiVirus -eq 1) {"Red"} else {"Green"})
+if ($status.MDE.ELAMDriver.Issue) {
+    Write-Host "     Issue:              $($status.MDE.ELAMDriver.Issue)" -ForegroundColor Red
+    Write-Host "     Action:             Remove DisableAntiSpyware and DisableAntiVirus policies" -ForegroundColor Gray
+}
+Write-Host ""
+
+# Windows Defender Services
+Write-Host "   Windows Defender Core Services:" -ForegroundColor Cyan
+foreach ($svcName in $status.MDE.DefenderServices.Keys | Sort-Object) {
+    $svc = $status.MDE.DefenderServices[$svcName]
+    $statusColor = if ($svc.Status -eq "Running" -or $svc.StartType -match "Auto|Manual") {"Green"} else {"Yellow"}
+    Write-Host "     $($svcName.PadRight(12)): $($svc.Status)" -ForegroundColor $statusColor
+}
+Write-Host ""
+
+# SENSE FoD Check
+Write-Host "   SENSE Feature on Demand:" -ForegroundColor Cyan
+Write-Host "     Installed:   $($status.MDE.SenseFoD.Installed)" -ForegroundColor $(if ($status.MDE.SenseFoD.Installed -eq "Yes") {"Green"} elseif ($status.MDE.SenseFoD.Installed -eq "No") {"Red"} else {"Yellow"})
+if ($status.MDE.SenseFoD.Installed -eq "No") {
+    Write-Host "     Action:      Install SENSE FoD using:" -ForegroundColor Gray
+    Write-Host "                  Add-WindowsCapability -Online -Name Microsoft.Windows.Sense.Client~~~~" -ForegroundColor White
+}
+Write-Host ""
+
+# Registry Health
+Write-Host "   MDE Registry Health:" -ForegroundColor Cyan
+Write-Host "     Policy Key Exists:  $($status.MDE.RegistryHealth.PolicyKeyExists)" -ForegroundColor $(if ($status.MDE.RegistryHealth.PolicyKeyExists) {"Green"} else {"Red"})
+Write-Host "     Status Key Exists:  $($status.MDE.RegistryHealth.StatusKeyExists)" -ForegroundColor $(if ($status.MDE.RegistryHealth.StatusKeyExists) {"Green"} else {"Red"})
+if ($status.MDE.RegistryHealth.OnboardingStateValue -ne $null) {
+    Write-Host "     OnboardingState:    $($status.MDE.RegistryHealth.OnboardingStateValue)" -ForegroundColor $(if ($status.MDE.RegistryHealth.OnboardingStateValue -eq 1) {"Green"} else {"Red"})
+}
+if ($status.MDE.RegistryHealth.Issue) {
+    Write-Host "     Issue:              $($status.MDE.RegistryHealth.Issue)" -ForegroundColor Yellow
+}
+Write-Host ""
+
+# Event Log Errors
+Write-Host "   SENSE Event Log Analysis (Last 24 hours):" -ForegroundColor Cyan
+if ($status.MDE.EventLogErrors.RecentErrorCount -is [int]) {
+    Write-Host "     Error Count:     $($status.MDE.EventLogErrors.RecentErrorCount)" -ForegroundColor $(if ($status.MDE.EventLogErrors.RecentErrorCount -eq 0) {"Green"} else {"Yellow"})
+    
+    if ($status.MDE.EventLogErrors.CriticalErrors.Count -gt 0) {
+        Write-Host "     Critical Events:" -ForegroundColor Red
+        foreach ($evt in $status.MDE.EventLogErrors.CriticalErrors) {
+            Write-Host "       Event ID $($evt.EventId): $($evt.Message.Substring(0, [Math]::Min(80, $evt.Message.Length)))..." -ForegroundColor Yellow
+            Write-Host "       Time: $($evt.TimeCreated)" -ForegroundColor Gray
+        }
+        Write-Host "       Check: Get-WinEvent -LogName 'Microsoft-Windows-SENSE/Operational' -MaxEvents 50" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "     Status:          $($status.MDE.EventLogErrors.RecentErrorCount)" -ForegroundColor Yellow
+}
+Write-Host ""
+
 # Report 4: Windows Setup Status
 Write-Host "4. WINDOWS SETUP STATUS" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
@@ -1714,11 +1958,14 @@ if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
     if ($mdeChecks.Count -gt 0) {
         $mdePassed = ($mdeChecks | Where-Object { $_.Status -eq "Passed" }).Count
         $mdeFailed = ($mdeChecks | Where-Object { $_.Status -eq "Failed" }).Count
-        $mdeMandatoryFailed = ($mdeChecks | Where-Object { $_.Status -eq "Failed" -and $_.Mandatory -eq $true }).Count
-        $mdeOptionalFailed = ($mdeChecks | Where-Object { $_.Status -eq "Failed" -and $_.Mandatory -eq $false }).Count
+        $mdeMandatoryFailed = @($mdeChecks | Where-Object { $_.Status -eq "Failed" -and $_.Mandatory -eq $true }).Count
+        $mdeOptionalFailed = @($mdeChecks | Where-Object { $_.Status -eq "Failed" -and $_.Mandatory -eq $false }).Count
+        $mdeMandatoryTotal = @($mdeChecks | Where-Object { $_.Mandatory -eq $true }).Count
+        $mdeOptionalTotal = @($mdeChecks | Where-Object { $_.Mandatory -eq $false }).Count
         Write-Host "   MDE Agent Runtime Endpoints (Manual & Arc-managed): $mdePassed Passed, $mdeFailed Failed" -ForegroundColor Cyan
+        Write-Host "   Endpoint Breakdown: $mdeMandatoryTotal Mandatory, $mdeOptionalTotal Optional" -ForegroundColor DarkGray
         if ($mdeMandatoryFailed -gt 0 -or $mdeOptionalFailed -gt 0) {
-            Write-Host "   Failed Endpoints: $mdeMandatoryFailed Mandatory, $mdeOptionalFailed Optional" -ForegroundColor $(if ($mdeMandatoryFailed -gt 0) { "Red" } else { "Yellow" })
+            Write-Host "   Failed Breakdown: $mdeMandatoryFailed Mandatory, $mdeOptionalFailed Optional" -ForegroundColor $(if ($mdeMandatoryFailed -gt 0) { "Red" } else { "Yellow" })
         }
         Write-Host "   Note: Required for MDE agent operation (both onboarding methods)" -ForegroundColor DarkGray
         foreach ($check in $mdeChecks) {
@@ -1830,8 +2077,8 @@ if ($status.ConnectivityChecks) {
     }
     
     # Check MDE connectivity failures (combined MDE.Windows and MDE categories)
-    $failedMDEMandatory = $status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" -and ($_.Category -eq "MDE" -or $_.Category -eq "MDE.Windows") -and $_.Mandatory -eq $true }
-    $failedMDEOptional = $status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" -and ($_.Category -eq "MDE" -or $_.Category -eq "MDE.Windows") -and $_.Mandatory -eq $false }
+    $failedMDEMandatory = @($status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" -and ($_.Category -eq "MDE" -or $_.Category -eq "MDE.Windows") -and $_.Mandatory -eq $true })
+    $failedMDEOptional = @($status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" -and ($_.Category -eq "MDE" -or $_.Category -eq "MDE.Windows") -and $_.Mandatory -eq $false })
     
     if ($failedMDEMandatory.Count -gt 0) {
         Write-Host "[CRITICAL] $($failedMDEMandatory.Count) MANDATORY MDE connectivity check(s) failed" -ForegroundColor Red
@@ -1942,8 +2189,8 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         Write-Host ""
         Write-Host "           ROOT CAUSE IDENTIFIED:" -ForegroundColor Yellow
         Write-Host "           =====================" -ForegroundColor Yellow
-        Write-Host "           Registry OnboardingState: 1 (Onboarded) \u2713" -ForegroundColor Green
-        Write-Host "           Registry LastConnected: NOT PRESENT \u2717" -ForegroundColor Red
+        Write-Host "           Registry OnboardingState: 1 (Onboarded) [✓]" -ForegroundColor Green
+        Write-Host "           Registry LastConnected: NOT PRESENT [✗]" -ForegroundColor Red
         Write-Host ""
         Write-Host "           THE PROBLEM:" -ForegroundColor Red
         Write-Host "           - MDE was onboarded locally (registry key set)" -ForegroundColor Gray
@@ -2063,7 +2310,7 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         Write-Host "           - Open Azure Portal → Defender for Cloud → Servers" -ForegroundColor Gray
         Write-Host "           - Locate this server: $($env:COMPUTERNAME)" -ForegroundColor Cyan
         Write-Host "           - Refresh the page (Ctrl+F5)" -ForegroundColor Gray
-        Write-Host "           - Verify status shows: 'Defender for Server: Onboarded' \u2713" -ForegroundColor Green
+        Write-Host "           - Verify status shows: 'Defender for Server: Onboarded' [OK]" -ForegroundColor Green
         Write-Host ""
         $issuesFound = $true
         $portalShowsOnboarded = $false
@@ -2076,16 +2323,16 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         Write-Host ""
         Write-Host "          VERIFIED STATUS:" -ForegroundColor Green
         Write-Host "          ===============" -ForegroundColor Green
-        Write-Host "          Registry OnboardingState: 1 (Onboarded) \u2713" -ForegroundColor Green
-        Write-Host "          Registry LastConnected: $($status.MDE.LastConnected) \u2713" -ForegroundColor Green
-        Write-Host "          Portal Status: 'Defender for Server: Onboarded' \u2713" -ForegroundColor Green
+        Write-Host "          Registry OnboardingState: 1 (Onboarded) [OK]" -ForegroundColor Green
+        Write-Host "          Registry LastConnected: $($status.MDE.LastConnected) [OK]" -ForegroundColor Green
+        Write-Host "          Portal Status: 'Defender for Server: Onboarded' [OK]" -ForegroundColor Green
         Write-Host ""
         
         # Show version status as evidence of cloud connectivity
         if ($status.MDE.VersionStatus -and $status.MDE.VersionStatus -ne "Unable to analyze") {
             if ($status.MDE.VersionStatus -eq "Current") {
                 Write-Host "          Agent Version: $($status.MDE.PlatformVersion)" -ForegroundColor Green
-                Write-Host "          Version Status: $($status.MDE.VersionStatus) \u2713" -ForegroundColor Green
+                Write-Host "          Version Status: $($status.MDE.VersionStatus) [OK]" -ForegroundColor Green
                 Write-Host "          (Agent successfully receiving updates from Microsoft cloud)" -ForegroundColor Cyan
                 Write-Host ""
             } else {
