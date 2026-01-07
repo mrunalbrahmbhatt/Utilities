@@ -3,7 +3,7 @@
 # Run as Administrator
 #
 # Usage: .\ValidateArcMDE.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"]
-# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId ""
 # Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9" -Region "US"
 
 <#
@@ -549,6 +549,431 @@ try {
     $status.MDE.SenseFoD.Output = $_.Exception.Message
 }
 
+# ========== STREAMLINED CONNECTIVITY PREREQUISITES CHECK ==========
+# Reference: https://learn.microsoft.com/en-us/defender-endpoint/configure-device-connectivity#prerequisites
+
+$status.MDE.StreamlinedConnectivity = @{
+    Supported = $false
+    OSSupported = $false
+    KBUpdateSupported = $false
+    SenseVersionSupported = $false
+    AMVersionSupported = $false
+    EngineVersionSupported = $false
+    SecurityIntelligenceSupported = $false
+    Issues = @()
+    Details = @{}
+}
+
+# Get OS information for streamlined connectivity check (collected early before main OS section)
+$osInfo = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+$osVersion = if ($osInfo) { $osInfo.Version } else { "Unknown" }
+$osBuild = if ($osInfo -and $osInfo.BuildNumber) { [int]$osInfo.BuildNumber } else { 0 }
+$osCaption = if ($osInfo) { $osInfo.Caption } else { "Unknown" }
+
+# Check OS Version Support for Streamlined Connectivity
+
+# Determine OS support
+$osSupported = $false
+$osSupportMessage = ""
+
+if ($osCaption -match "Windows 11") {
+    $osSupported = $true
+    $osSupportMessage = "Windows 11 (Fully Supported)"
+    $minRequiredBuild = 22000
+} elseif ($osCaption -match "Windows 10" -and $osBuild -ge 17763) {
+    # Windows 10 1809 (17763) or later
+    $osSupported = $true
+    if ($osBuild -ge 19041) {
+        $osSupportMessage = "Windows 10 version 1809+ (Fully Supported)"
+    } elseif ($osBuild -ge 16299 -and $osBuild -lt 17763) {
+        $osSupportMessage = "Windows 10 version 1607-1803 (Requires different URL list)"
+        $status.MDE.StreamlinedConnectivity.Issues += "OS version requires extended URL list - see https://aka.ms/MDE-streamlined-urls"
+    } else {
+        $osSupportMessage = "Windows 10 version 1809+ (Fully Supported)"
+    }
+} elseif ($osCaption -match "Server 2022") {
+    $osSupported = $true
+    $osSupportMessage = "Windows Server 2022 (Supported)"
+} elseif ($osCaption -match "Server 2019") {
+    $osSupported = $true
+    $osSupportMessage = "Windows Server 2019 (Supported)"
+} elseif ($osCaption -match "Server 2016" -or $osCaption -match "Server 2012 R2") {
+    # NOT supported for streamlined with KB updates - requires unified agent
+    $osSupported = $false
+    $osSupportMessage = "Windows Server 2016/2012 R2 (NOT SUPPORTED - KB updates unavailable)"
+    $status.MDE.StreamlinedConnectivity.Issues += "Server 2016/2012 R2 do not support streamlined connectivity with KB updates - requires modern unified solution agent"
+} else {
+    $osSupportMessage = "OS not supported for streamlined connectivity"
+    $status.MDE.StreamlinedConnectivity.Issues += "OS version not supported - requires Windows 10 1809+, Windows 11, or Windows Server 2019+"
+}
+
+$status.MDE.StreamlinedConnectivity.OSSupported = $osSupported
+$status.MDE.StreamlinedConnectivity.Details.OSVersion = $osSupportMessage
+
+# Check Required KB Updates (Windows only - per Microsoft documentation)
+# Reference: https://learn.microsoft.com/en-us/defender-endpoint/configure-device-connectivity#prerequisites
+$kbUpdateSupported = $false
+$kbUpdateMessage = "Not applicable"
+$requiredKB = $null
+
+if ($osCaption -match "Windows") {
+    # Define required KB updates based on Windows version
+    if ($osCaption -match "Windows 11") {
+        $requiredKB = "KB5011493"  # March 8, 2022
+        $minBuild = 22000
+    } elseif ($osCaption -match "Windows 10") {
+        if ($osBuild -ge 19044) {
+            # Windows 10 21H2, 22H2
+            if ($osBuild -ge 19045) {
+                $requiredKB = "KB5020953"  # October 28, 2022 for 22H2
+            } else {
+                $requiredKB = "KB5011487"  # March 8, 2022 for 20H2/21H2
+            }
+        } elseif ($osBuild -ge 19042) {
+            $requiredKB = "KB5011487"  # March 8, 2022 for 20H2
+        } elseif ($osBuild -ge 18363) {
+            $requiredKB = "KB5011485"  # March 8, 2022 for 19H2 (1909)
+        } elseif ($osBuild -ge 17763) {
+            $requiredKB = "KB5011503"  # March 8, 2022 for 1809
+        } elseif ($osBuild -ge 16299 -and $osBuild -lt 17763) {
+            # Windows 10 1607, 1703, 1709, 1803 - end of service but supported with different URL list
+            $requiredKB = "End of service"
+            $kbUpdateMessage = "OS version end of service (requires extended URL list)"
+            $kbUpdateSupported = $false
+        }
+    } elseif ($osCaption -match "Server 2022") {
+        $requiredKB = "KB5011497"  # March 8, 2022
+    } elseif ($osCaption -match "Server 2019") {
+        $requiredKB = "KB5011503"  # March 8, 2022 (same as Windows 10 1809)
+    } elseif ($osCaption -match "Server 2016" -or $osCaption -match "Server 2012 R2") {
+        $requiredKB = "Not available"
+        $kbUpdateMessage = "NOT SUPPORTED - No KB update available (requires modern unified solution package)"
+        $kbUpdateSupported = $false
+    }
+    
+    # Check if required KB is installed (if applicable)
+    if ($requiredKB -and $requiredKB -notmatch "End of service|Unified Agent") {
+        try {
+            # Check installed hotfixes
+            $installedKB = Get-HotFix | Where-Object { $_.HotFixID -match $requiredKB.Replace("KB", "") }
+            
+            if ($installedKB) {
+                $kbUpdateSupported = $true
+                $kbUpdateMessage = "$requiredKB installed (Installed: $($installedKB.InstalledOn))"
+            } else {
+                # KB might be integrated into the build - check build revision
+                # For Windows 10/11, March 2022 updates have specific build revisions
+                $currentBuild = $osBuild
+                $buildRevision = if ($osVersion -match "\d+\.\d+\.(\d+)\.(\d+)") { 
+                    [int]$matches[2] 
+                } else { 
+                    0 
+                }
+                
+                # Define minimum build numbers and revisions for March 2022 updates
+                $minBuildNumber = 0
+                $minRevision = 0
+                
+                if ($osCaption -match "Windows 11") {
+                    $minBuildNumber = 22000
+                    $minRevision = 556  # Build 22000.556 (March 2022)
+                } elseif ($osCaption -match "Windows 10") {
+                    if ($currentBuild -eq 19044 -or $currentBuild -eq 19043 -or $currentBuild -eq 19042) {
+                        $minBuildNumber = 19042
+                        $minRevision = 1586  # Build 19044.1586/19042.1586 (March 2022)
+                    } elseif ($currentBuild -eq 18363) {
+                        $minBuildNumber = 18363
+                        $minRevision = 2097  # Build 18363.2097 (March 2022)
+                    } elseif ($currentBuild -eq 17763) {
+                        $minBuildNumber = 17763
+                        $minRevision = 2628  # Build 17763.2628 (March 2022)
+                    }
+                } elseif ($osCaption -match "Server 2022") {
+                    $minBuildNumber = 20348
+                    $minRevision = 587   # Server 2022 Build 20348.587 (March 2022)
+                } elseif ($osCaption -match "Server 2019") {
+                    $minBuildNumber = 17763
+                    $minRevision = 2628  # Same as Windows 10 1809
+                }
+                
+                # Check if current build is newer than the minimum required build
+                if ($currentBuild -gt $minBuildNumber -and $minBuildNumber -gt 0) {
+                    # Build number is higher than March 2022 baseline - definitely includes the update
+                    $kbUpdateSupported = $true
+                    $kbUpdateMessage = "$requiredKB or later integrated (Build: $currentBuild.$buildRevision - newer than required $minBuildNumber.$minRevision)"
+                } elseif ($currentBuild -eq $minBuildNumber) {
+                    # Same build number - check revision
+                    if ($buildRevision -ge $minRevision) {
+                        $kbUpdateSupported = $true
+                        $kbUpdateMessage = "$requiredKB or later integrated (Build: $currentBuild.$buildRevision)"
+                    } else {
+                        $kbUpdateMessage = "$requiredKB NOT FOUND (Current: $currentBuild.$buildRevision, Required: >= $minBuildNumber.$minRevision)"
+                        $status.MDE.StreamlinedConnectivity.Issues += "Required KB update $requiredKB not installed (March 8, 2022 or later required)"
+                    }
+                } else {
+                    # Build number is older than March 2022 baseline
+                    $kbUpdateMessage = "$requiredKB NOT FOUND (Current: $currentBuild.$buildRevision, Required: >= $minBuildNumber.$minRevision)"
+                    $status.MDE.StreamlinedConnectivity.Issues += "Required KB update $requiredKB not installed (March 8, 2022 or later required)"
+                }
+            }
+        } catch {
+            $kbUpdateMessage = "Error checking KB updates: $($_.Exception.Message)"
+            $status.MDE.StreamlinedConnectivity.Issues += "Unable to verify required KB update"
+        }
+    }
+} else {
+    # Non-Windows OS
+    $kbUpdateMessage = "Not applicable (non-Windows OS)"
+}
+
+$status.MDE.StreamlinedConnectivity.KBUpdateSupported = $kbUpdateSupported
+$status.MDE.StreamlinedConnectivity.Details.KBUpdate = $kbUpdateMessage
+if ($requiredKB -and $requiredKB -notmatch "End of service|Unified Agent") {
+    $status.MDE.StreamlinedConnectivity.Details.RequiredKB = $requiredKB
+}
+
+# Check SENSE Version (Minimum: 10.8040.* - March 8, 2022)
+$senseVersionSupported = $false
+$senseVersionMessage = "Unknown"
+
+if ($status.MDE.SenseExeExists -match "Yes") {
+    try {
+        $senseExePath = "$mdeInstallPath\MsSense.exe"
+        $senseFileVersion = (Get-Item $senseExePath -ErrorAction SilentlyContinue).VersionInfo.FileVersion
+        
+        if ($senseFileVersion) {
+            # Parse version (format: 10.8804.xxxxx.xxxx)
+            if ($senseFileVersion -match "(\d+)\.(\d+)\.(\d+)") {
+                $senseMajor = [int]$matches[1]
+                $senseMinor = [int]$matches[2]
+                $senseBuild = [int]$matches[3]
+                
+                # Check if >= 10.8040 (March 2022 minimum)
+                if ($senseMajor -gt 10 -or ($senseMajor -eq 10 -and $senseMinor -ge 8040)) {
+                    $senseVersionSupported = $true
+                    $senseVersionMessage = "Version $senseFileVersion (Supported - March 2022+)"
+                } else {
+                    $senseVersionMessage = "Version $senseFileVersion (Too old - requires 10.8040+)"
+                    $status.MDE.StreamlinedConnectivity.Issues += "SENSE version $senseFileVersion is below minimum 10.8040.* (March 2022)"
+                }
+            } else {
+                $senseVersionMessage = "Version $senseFileVersion (Unable to parse)"
+            }
+        }
+    } catch {
+        $senseVersionMessage = "Error checking version"
+    }
+} else {
+    $senseVersionMessage = "MsSense.exe not found"
+    $status.MDE.StreamlinedConnectivity.Issues += "SENSE agent not installed"
+}
+
+$status.MDE.StreamlinedConnectivity.SenseVersionSupported = $senseVersionSupported
+$status.MDE.StreamlinedConnectivity.Details.SenseVersion = $senseVersionMessage
+
+# Check Microsoft Defender Antivirus Versions
+# Minimum requirements:
+# - Antimalware Client: 4.18.2211.5
+# - Engine: 1.1.19900.2
+# - Security Intelligence: 1.391.345.0
+
+$amVersionSupported = $false
+$engineVersionSupported = $false
+$siVersionSupported = $false
+
+if ($status.MDE.PlatformVersion -ne "Unknown") {
+    try {
+        # Parse Platform/AM Client version (4.18.2211.5)
+        if ($status.MDE.PlatformVersion -match "(\d+)\.(\d+)\.(\d+)\.(\d+)") {
+            $amMajor = [int]$matches[1]
+            $amMinor = [int]$matches[2]
+            $amBuild = [int]$matches[3]
+            $amRevision = [int]$matches[4]
+            
+            # Check if >= 4.18.2211.5
+            if ($amMajor -gt 4 -or 
+                ($amMajor -eq 4 -and $amMinor -gt 18) -or
+                ($amMajor -eq 4 -and $amMinor -eq 18 -and $amBuild -gt 2211) -or
+                ($amMajor -eq 4 -and $amMinor -eq 18 -and $amBuild -eq 2211 -and $amRevision -ge 5)) {
+                $amVersionSupported = $true
+                $status.MDE.StreamlinedConnectivity.Details.AMClientVersion = "$($status.MDE.PlatformVersion) (Supported)"
+            } else {
+                $status.MDE.StreamlinedConnectivity.Details.AMClientVersion = "$($status.MDE.PlatformVersion) (Below minimum 4.18.2211.5)"
+                $status.MDE.StreamlinedConnectivity.Issues += "Antimalware Client version below minimum 4.18.2211.5"
+            }
+        }
+    } catch {
+        $status.MDE.StreamlinedConnectivity.Details.AMClientVersion = "Error parsing version"
+    }
+} else {
+    $status.MDE.StreamlinedConnectivity.Details.AMClientVersion = "Not available"
+    $status.MDE.StreamlinedConnectivity.Issues += "Unable to determine Antimalware Client version"
+}
+
+if ($status.MDE.EngineVersion -ne "Unknown") {
+    try {
+        # Parse Engine version (1.1.19900.2)
+        if ($status.MDE.EngineVersion -match "(\d+)\.(\d+)\.(\d+)\.(\d+)") {
+            $engMajor = [int]$matches[1]
+            $engMinor = [int]$matches[2]
+            $engBuild = [int]$matches[3]
+            
+            # Check if >= 1.1.19900.2
+            if ($engMajor -gt 1 -or
+                ($engMajor -eq 1 -and $engMinor -gt 1) -or
+                ($engMajor -eq 1 -and $engMinor -eq 1 -and $engBuild -ge 19900)) {
+                $engineVersionSupported = $true
+                $status.MDE.StreamlinedConnectivity.Details.EngineVersion = "$($status.MDE.EngineVersion) (Supported)"
+            } else {
+                $status.MDE.StreamlinedConnectivity.Details.EngineVersion = "$($status.MDE.EngineVersion) (Below minimum 1.1.19900.2)"
+                $status.MDE.StreamlinedConnectivity.Issues += "Engine version below minimum 1.1.19900.2"
+            }
+        }
+    } catch {
+        $status.MDE.StreamlinedConnectivity.Details.EngineVersion = "Error parsing version"
+    }
+} else {
+    $status.MDE.StreamlinedConnectivity.Details.EngineVersion = "Not available"
+    $status.MDE.StreamlinedConnectivity.Issues += "Unable to determine Engine version"
+}
+
+# Check Security Intelligence version (signatures)
+if ($status.MDE.AntivirusSignatureAge -ne "Unknown") {
+    # Note: We can't easily check the exact version number (1.391.345.0) without additional queries
+    # But we can check if signatures are current
+    if ($status.MDE.DefenderSignaturesOutOfDate -eq "No") {
+        $siVersionSupported = $true
+        $status.MDE.StreamlinedConnectivity.Details.SecurityIntelligence = "Current (Up-to-date)"
+    } else {
+        $status.MDE.StreamlinedConnectivity.Details.SecurityIntelligence = "Outdated ($($status.MDE.AntivirusSignatureAge))"
+        $status.MDE.StreamlinedConnectivity.Issues += "Security Intelligence signatures are outdated"
+    }
+} else {
+    $status.MDE.StreamlinedConnectivity.Details.SecurityIntelligence = "Not available"
+}
+
+$status.MDE.StreamlinedConnectivity.AMVersionSupported = $amVersionSupported
+$status.MDE.StreamlinedConnectivity.EngineVersionSupported = $engineVersionSupported
+$status.MDE.StreamlinedConnectivity.SecurityIntelligenceSupported = $siVersionSupported
+
+# Check if device is CURRENTLY USING streamlined connectivity (not just capable)
+$status.MDE.StreamlinedConnectivity.CurrentlyUsing = @{
+    InUse = $false
+    Configured = $false
+    Functional = $false
+    Method = "Unknown"
+    StreamlinedDomain = "Not tested"
+    Evidence = @()
+    Issues = @()
+}
+
+# Only check if MDE is onboarded
+if ($status.MDE.OnboardingState -eq "Onboarded") {
+    try {
+        $streamlinedConfigured = $false
+        $standardConfigured = $false
+        
+        # Test connectivity to streamlined domain
+        $streamlinedDomain = "endpoint.security.microsoft.com"
+        $streamlinedTest = Test-NetConnection -ComputerName $streamlinedDomain -Port 443 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        
+        if ($streamlinedTest.TcpTestSucceeded) {
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.StreamlinedDomain = "Reachable"
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Streamlined domain ($streamlinedDomain) is reachable"
+        } else {
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.StreamlinedDomain = "Unreachable"
+        }
+        
+        # Check onboarding info from registry for clues
+        $onboardingInfoPath = "HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status"
+        if (Test-Path $onboardingInfoPath) {
+            $onboardingInfo = Get-ItemProperty -Path $onboardingInfoPath -ErrorAction SilentlyContinue
+            
+            # Check OrgId to see if it's using newer format (streamlined tends to have different patterns)
+            if ($onboardingInfo.PSObject.Properties.Name -contains "OnboardingInfo") {
+                $onboardingInfoValue = $onboardingInfo.OnboardingInfo
+                if ($onboardingInfoValue -match "endpoint\.security\.microsoft\.com") {
+                    $streamlinedConfigured = $true
+                    $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Configured = $true
+                    $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Onboarding info contains streamlined domain"
+                }
+            }
+        }
+        
+        # Check SENSE service configuration for URL patterns
+        $senseConfigPath = "HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection"
+        if (Test-Path $senseConfigPath) {
+            $senseConfig = Get-ItemProperty -Path $senseConfigPath -ErrorAction SilentlyContinue
+            
+            # Look for configuration keys that might indicate streamlined connectivity
+            foreach ($prop in $senseConfig.PSObject.Properties) {
+                if ($prop.Value -match "endpoint\.security\.microsoft\.com") {
+                    $streamlinedConfigured = $true
+                    $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Configured = $true
+                    $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Configuration contains streamlined domain ($($prop.Name))"
+                } elseif ($prop.Value -match "winatp-gw-.*\.microsoft\.com") {
+                    $standardConfigured = $true
+                }
+            }
+        }
+        
+        # Determine method and functional status
+        if ($streamlinedConfigured) {
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Method = "Streamlined (Configured)"
+            
+            # Check if it's actually functional
+            if ($status.MDE.StreamlinedConnectivity.CurrentlyUsing.StreamlinedDomain -eq "Reachable") {
+                $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional = $true
+                $status.MDE.StreamlinedConnectivity.CurrentlyUsing.InUse = $true
+                $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Method = "Streamlined"
+            } else {
+                # Configured but not functional
+                $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Issues += "Streamlined configured but domain unreachable - connectivity blocked"
+                
+                # Check if OS even supports streamlined
+                if (-not $osSupported) {
+                    $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Issues += "OS does not support streamlined connectivity - requires Windows 10 1809+, Windows 11, or Windows Server 2019+"
+                    $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Issues += "Server 2012 R2/2016 require unified agent upgrade"
+                }
+            }
+        } elseif ($standardConfigured) {
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Method = "Standard"
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Configuration contains standard gateway URLs"
+            # Standard method doesn't require domain test
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional = $true
+        } else {
+            # If still unknown but device is onboarded and working, assume standard method
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Method = "Standard (Inferred)"
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Device is onboarded but no streamlined indicators found - likely using standard connectivity"
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional = $true
+        }
+        
+    } catch {
+        $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Method = "Error checking: $($_.Exception.Message)"
+    }
+} else {
+    $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Method = "N/A (Device not onboarded)"
+}
+
+# Overall determination
+if ($osSupported -and $kbUpdateSupported -and $senseVersionSupported -and $amVersionSupported -and $engineVersionSupported) {
+    $status.MDE.StreamlinedConnectivity.Supported = $true
+} else {
+    $status.MDE.StreamlinedConnectivity.Supported = $false
+}
+
+# Add summary
+$passedChecks = 0
+$totalChecks = 6
+if ($osSupported) { $passedChecks++ }
+if ($kbUpdateSupported) { $passedChecks++ }
+if ($senseVersionSupported) { $passedChecks++ }
+if ($amVersionSupported) { $passedChecks++ }
+if ($engineVersionSupported) { $passedChecks++ }
+if ($siVersionSupported) { $passedChecks++ }
+
+$status.MDE.StreamlinedConnectivity.Summary = "$passedChecks of $totalChecks prerequisites met"
+
 # 5. Check MDE Registry Permissions & Status Key
 $status.MDE.RegistryHealth = @{
     PolicyKeyExists = $false
@@ -882,9 +1307,38 @@ if ($mdeExtInfo.Installed) {
             $statusContent = Get-Content $statusFile.FullName -Raw | ConvertFrom-Json
             if ($statusContent.status) {
                 $mdeExtInfo.DetailedStatus = $statusContent.status.status
+                
+                # Parse the message - it could be error or success information
                 if ($statusContent.status.formattedMessage -and $statusContent.status.formattedMessage.message) {
-                    $mdeExtInfo.ErrorMessage = $statusContent.status.formattedMessage.message
+                    $messageContent = $statusContent.status.formattedMessage.message
+                    
+                    # Try to parse as JSON to see if it's structured info
+                    try {
+                        $parsedMessage = $messageContent | ConvertFrom-Json
+                        
+                        # Check if this is success information
+                        if ($parsedMessage.onboardingPackageOperationResultCode -eq "Success") {
+                            $mdeExtInfo.OnboardingSuccess = $true
+                            $mdeExtInfo.MachineId = $parsedMessage.machineId
+                            $mdeExtInfo.AzureResourceId = $parsedMessage.azureResourceId
+                            $mdeExtInfo.WorkspaceId = $parsedMessage.securityWorkspaceId
+                            
+                            # Store full details for display
+                            $mdeExtInfo.OnboardingDetails = $parsedMessage
+                        } else {
+                            # It's structured but not success
+                            $mdeExtInfo.ErrorMessage = $messageContent
+                        }
+                    } catch {
+                        # Not JSON, treat as regular message
+                        if ($messageContent -match "error|failed|exception") {
+                            $mdeExtInfo.ErrorMessage = $messageContent
+                        } else {
+                            $mdeExtInfo.StatusMessage = $messageContent
+                        }
+                    }
                 }
+                
                 if ($statusContent.status.code) {
                     $mdeExtInfo.ErrorCode = $statusContent.status.code
                 }
@@ -1752,6 +2206,202 @@ if ($status.MDE.EventLogErrors.RecentErrorCount -is [int]) {
 }
 Write-Host ""
 
+# Report 3.3: Streamlined Connectivity Prerequisites
+Write-Host "3.3 STREAMLINED CONNECTIVITY PREREQUISITES" -ForegroundColor Green
+Write-Host "   ----------------------------------------" -ForegroundColor Green
+Write-Host "   Reference: https://learn.microsoft.com/en-us/defender-endpoint/configure-device-connectivity#prerequisites" -ForegroundColor DarkGray
+Write-Host ""
+
+$streamlinedStatus = $status.MDE.StreamlinedConnectivity
+$streamlinedColor = if ($streamlinedStatus.Supported) { "Green" } else { "Yellow" }
+
+Write-Host "   Overall Status:   $(if ($streamlinedStatus.Supported) { 'SUPPORTED' } else { 'NOT FULLY SUPPORTED' })" -ForegroundColor $streamlinedColor
+Write-Host "   Summary:          $($streamlinedStatus.Summary)" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "   Prerequisite Checks:" -ForegroundColor Cyan
+Write-Host "     [$(if ($streamlinedStatus.OSSupported) { '✓' } else { '✗' })] Operating System:      $($streamlinedStatus.Details.OSVersion)" -ForegroundColor $(if ($streamlinedStatus.OSSupported) { "Green" } else { "Red" })
+Write-Host "     [$(if ($streamlinedStatus.KBUpdateSupported) { '✓' } else { '✗' })] Required KB Update:    $($streamlinedStatus.Details.KBUpdate)" -ForegroundColor $(if ($streamlinedStatus.KBUpdateSupported) { "Green" } else { "Red" })
+Write-Host "     [$(if ($streamlinedStatus.SenseVersionSupported) { '✓' } else { '✗' })] SENSE Version:        $($streamlinedStatus.Details.SenseVersion)" -ForegroundColor $(if ($streamlinedStatus.SenseVersionSupported) { "Green" } else { "Red" })
+Write-Host "     [$(if ($streamlinedStatus.AMVersionSupported) { '✓' } else { '✗' })] AM Client Version:    $($streamlinedStatus.Details.AMClientVersion)" -ForegroundColor $(if ($streamlinedStatus.AMVersionSupported) { "Green" } else { "Red" })
+Write-Host "     [$(if ($streamlinedStatus.EngineVersionSupported) { '✓' } else { '✗' })] Engine Version:       $($streamlinedStatus.Details.EngineVersion)" -ForegroundColor $(if ($streamlinedStatus.EngineVersionSupported) { "Green" } else { "Red" })
+Write-Host "     [$(if ($streamlinedStatus.SecurityIntelligenceSupported) { '✓' } else { '✗' })] Security Intelligence: $($streamlinedStatus.Details.SecurityIntelligence)" -ForegroundColor $(if ($streamlinedStatus.SecurityIntelligenceSupported) { "Green" } else { "Red" })
+Write-Host ""
+
+# Display current connectivity method in use
+# Add Server 2016/2012 R2 specific guidance
+if ($status.OperatingSystem -match "Server 2016|Server 2012 R2") {
+    Write-Host "" 
+    Write-Host "   ⚠️  IMPORTANT: Windows Server 2016/2012 R2 Guidance" -ForegroundColor Yellow
+    Write-Host "   ─────────────────────────────────────────────────────" -ForegroundColor Yellow
+    Write-Host "   Streamlined connectivity is NOT supported via KB updates for Server 2016/2012 R2" -ForegroundColor Yellow
+    Write-Host "" 
+    Write-Host "   Alternative Option: Modern Unified Solution Agent" -ForegroundColor Cyan
+    Write-Host "     • Requires downloading and installing the modern unified solution package" -ForegroundColor Gray
+    Write-Host "     • Provides streamlined connectivity without KB updates" -ForegroundColor Gray
+    Write-Host "     • Reference: https://learn.microsoft.com/en-us/defender-endpoint/server-migration" -ForegroundColor Gray
+    Write-Host "" 
+    Write-Host "   Current Status: Using Standard Connectivity (Classic Method)" -ForegroundColor Cyan
+    Write-Host "     • This is the expected configuration for Server 2016/2012 R2" -ForegroundColor Gray
+    Write-Host "     • Standard connectivity remains fully supported" -ForegroundColor Gray
+    Write-Host "" 
+}
+
+Write-Host "   Currently Using:" -ForegroundColor Cyan
+$currentMethod = $streamlinedStatus.CurrentlyUsing.Method
+$isConfigured = $streamlinedStatus.CurrentlyUsing.Configured
+$isFunctional = $streamlinedStatus.CurrentlyUsing.Functional
+
+# Determine color based on functional status
+if ($currentMethod -match "Streamlined" -and $isFunctional) {
+    $methodColor = "Green"
+    $statusIcon = "✅"
+} elseif ($currentMethod -match "Streamlined" -and $isConfigured -and -not $isFunctional) {
+    $methodColor = "Red"
+    $statusIcon = "⚠️"
+} elseif ($currentMethod -match "Standard") {
+    $methodColor = "Yellow"
+    $statusIcon = "ℹ️"
+} else {
+    $methodColor = "Gray"
+    $statusIcon = " "
+}
+
+Write-Host "     $statusIcon Connectivity Method: $currentMethod" -ForegroundColor $methodColor
+
+# Show functional status for streamlined
+if ($currentMethod -match "Streamlined") {
+    if ($isFunctional) {
+        Write-Host "     Status: FUNCTIONAL - Streamlined connectivity is working" -ForegroundColor Green
+    } else {
+        Write-Host "     Status: NOT FUNCTIONAL - Configuration present but connectivity blocked" -ForegroundColor Red
+    }
+}
+
+if ($streamlinedStatus.CurrentlyUsing.StreamlinedDomain -ne "Not tested") {
+    $domainColor = if ($streamlinedStatus.CurrentlyUsing.StreamlinedDomain -eq "Reachable") { "Green" } else { "Red" }
+    Write-Host "     Streamlined Domain:  $($streamlinedStatus.CurrentlyUsing.StreamlinedDomain) (*.endpoint.security.microsoft.com)" -ForegroundColor $domainColor
+}
+
+if ($streamlinedStatus.CurrentlyUsing.Evidence.Count -gt 0) {
+    Write-Host "     Detection Evidence:" -ForegroundColor Gray
+    foreach ($evidence in $streamlinedStatus.CurrentlyUsing.Evidence) {
+        Write-Host "       • $evidence" -ForegroundColor Gray
+    }
+}
+
+# Show issues with current configuration
+if ($streamlinedStatus.CurrentlyUsing.Issues.Count -gt 0) {
+    Write-Host "     Configuration Issues:" -ForegroundColor Red
+    foreach ($issue in $streamlinedStatus.CurrentlyUsing.Issues) {
+        Write-Host "       ⚠️  $issue" -ForegroundColor Yellow
+    }
+}
+Write-Host ""
+
+if ($streamlinedStatus.Issues.Count -gt 0) {
+    Write-Host "   Issues Found:" -ForegroundColor Yellow
+    foreach ($issue in $streamlinedStatus.Issues) {
+        Write-Host "     • $issue" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
+
+if ($streamlinedStatus.Supported) {
+    Write-Host "   ✅ This device MEETS all prerequisites for streamlined connectivity" -ForegroundColor Green
+    
+    # Check if already using streamlined
+    if ($streamlinedStatus.CurrentlyUsing.InUse -and $streamlinedStatus.CurrentlyUsing.Functional) {
+        Write-Host "   ✅ Device is ALREADY USING streamlined connectivity (FUNCTIONAL)" -ForegroundColor Green
+        Write-Host "   Current configuration:" -ForegroundColor Cyan
+        Write-Host "     • Simplified domain: *.endpoint.security.microsoft.com" -ForegroundColor Gray
+        Write-Host "     • Reduced URL set for easier firewall configuration" -ForegroundColor Gray
+        Write-Host "     • No migration needed" -ForegroundColor Gray
+    } elseif ($streamlinedStatus.CurrentlyUsing.Configured -and -not $streamlinedStatus.CurrentlyUsing.Functional) {
+        Write-Host "   ⚠️  Device is CONFIGURED for streamlined but NOT FUNCTIONAL" -ForegroundColor Red
+        Write-Host "   Problem: Streamlined domain is unreachable - connectivity blocked" -ForegroundColor Red
+        Write-Host "" 
+        Write-Host "   Required Actions:" -ForegroundColor Yellow
+        Write-Host "     1. Add firewall rules to allow:" -ForegroundColor Gray
+        Write-Host "        • *.endpoint.security.microsoft.com:443" -ForegroundColor Gray
+        Write-Host "        • Specific endpoints like edr-*.endpoint.security.microsoft.com:443" -ForegroundColor Gray
+        Write-Host "     2. Also ensure standard fallback URLs are accessible:" -ForegroundColor Gray
+        Write-Host "        • winatp-gw-*.microsoft.com:443" -ForegroundColor Gray
+        Write-Host "        • events.data.microsoft.com:443" -ForegroundColor Gray
+        Write-Host "        • go.microsoft.com:443" -ForegroundColor Gray
+        Write-Host "        • definitionupdates.microsoft.com:443" -ForegroundColor Gray
+        Write-Host "     3. Restart SENSE service: Restart-Service Sense -Force" -ForegroundColor Gray
+        Write-Host "     4. Verify connectivity: Test-NetConnection endpoint.security.microsoft.com -Port 443" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "   Alternative: If firewall changes not possible:" -ForegroundColor Cyan
+        Write-Host "     • Re-onboard using standard connectivity package" -ForegroundColor Gray
+        Write-Host "     • Download from portal with 'Standard' connectivity type" -ForegroundColor Gray
+    } elseif ($streamlinedStatus.CurrentlyUsing.Method -match "Standard") {
+        Write-Host "   ℹ️  Device is currently using STANDARD connectivity" -ForegroundColor Yellow
+        Write-Host "   Migration to streamlined is available:" -ForegroundColor Cyan
+        Write-Host "     1. Download new streamlined onboarding package from Microsoft Defender portal" -ForegroundColor Gray
+        Write-Host "        Settings > Endpoints > Device management > Onboarding" -ForegroundColor Gray
+        Write-Host "        Select 'Streamlined' from Connectivity type dropdown" -ForegroundColor Gray
+        Write-Host "     2. Apply the new onboarding package" -ForegroundColor Gray
+        Write-Host "     3. Reboot the device" -ForegroundColor Gray
+        Write-Host "     4. Verify connectivity to *.endpoint.security.microsoft.com" -ForegroundColor Gray
+        Write-Host "     Reference: https://learn.microsoft.com/en-us/defender-endpoint/migrate-devices-streamlined" -ForegroundColor DarkGray
+    } else {
+        Write-Host "   You can onboard using the streamlined method with:" -ForegroundColor Cyan
+        Write-Host "     • Simplified domain: *.endpoint.security.microsoft.com" -ForegroundColor Gray
+        Write-Host "     • Reduced URL set for easier firewall configuration" -ForegroundColor Gray
+        Write-Host "     • Static IP ranges (optional alternative)" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "   ⚠️  This device DOES NOT meet all prerequisites for streamlined connectivity" -ForegroundColor Yellow
+    
+    # Special case: Streamlined configured but OS doesn't support it
+    if ($streamlinedStatus.CurrentlyUsing.Configured -and -not $osSupported) {
+        Write-Host ""
+        Write-Host "   ⚠️  CRITICAL CONFIGURATION ISSUE:" -ForegroundColor Red
+        Write-Host "   Device is configured for streamlined connectivity, but OS does not support it!" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "   Current OS: $osCaption (Build $osBuild)" -ForegroundColor Yellow
+        Write-Host "   Issue: Windows Server 2012 R2 / 2016 require modern unified agent for streamlined" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "   Required Actions (Choose one):" -ForegroundColor Cyan
+        Write-Host "   Option 1 - Upgrade to Unified Agent:" -ForegroundColor White
+        Write-Host "     • Uninstall current MDE installation" -ForegroundColor Gray
+        Write-Host "     • Install modern unified solution via MSI installer" -ForegroundColor Gray
+        Write-Host "     • Re-onboard with streamlined package" -ForegroundColor Gray
+        Write-Host "     • Reference: https://learn.microsoft.com/en-us/defender-endpoint/server-migration" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "   Option 2 - Switch to Standard Connectivity (Recommended for Server 2012 R2):" -ForegroundColor White
+        Write-Host "     • Download standard onboarding package from portal" -ForegroundColor Gray
+        Write-Host "     • Settings > Endpoints > Onboarding > Select 'Standard' connectivity" -ForegroundColor Gray
+        Write-Host "     • Offboard current configuration" -ForegroundColor Gray
+        Write-Host "     • Re-onboard with standard package" -ForegroundColor Gray
+        Write-Host "     • Configure firewall for standard endpoints (winatp-gw-*.microsoft.com)" -ForegroundColor Gray
+        Write-Host ""
+    } else {
+        Write-Host "   Required Actions:" -ForegroundColor Yellow
+        Write-Host "     • Update OS/SENSE/Defender versions to meet minimum requirements" -ForegroundColor Gray
+        Write-Host "     • Continue using standard connectivity method until prerequisites are met" -ForegroundColor Gray
+    }
+}
+
+Write-Host ""
+Write-Host "   Minimum Requirements (per Microsoft documentation):" -ForegroundColor Cyan
+Write-Host "     • OS: Windows 10 1809+, Windows 11, Windows Server 2019+" -ForegroundColor Gray
+Write-Host "     • KB Update: March 8, 2022 update or later for your OS version" -ForegroundColor Gray
+Write-Host "       - Windows 11: KB5011493" -ForegroundColor Gray
+Write-Host "       - Windows 10 22H2: KB5020953 (October 28, 2022)" -ForegroundColor Gray
+Write-Host "       - Windows 10 20H2/21H2: KB5011487" -ForegroundColor Gray
+Write-Host "       - Windows 10 19H2 (1909): KB5011485" -ForegroundColor Gray
+Write-Host "       - Windows 10 1809: KB5011503" -ForegroundColor Gray
+Write-Host "       - Windows Server 2022: KB5011497" -ForegroundColor Gray
+Write-Host "       - Windows Server 2019: KB5011503" -ForegroundColor Gray
+Write-Host "     • SENSE: Version 10.8040.* or higher (March 2022+)" -ForegroundColor Gray
+Write-Host "     • AM Client: Version 4.18.2211.5 or higher" -ForegroundColor Gray
+Write-Host "     • Engine: Version 1.1.19900.2 or higher" -ForegroundColor Gray
+Write-Host "     • Security Intelligence: Current and up-to-date" -ForegroundColor Gray
+Write-Host ""
+
 # Report 4: Windows Setup Status
 Write-Host "4. WINDOWS SETUP STATUS" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
@@ -1810,14 +2460,39 @@ if ($status.Extensions.Count -gt 0) {
                 if ($ext.DetailedStatus -and $ext.DetailedStatus -ne "Unknown") {
                     Write-Host "     Status: $($ext.DetailedStatus)" -ForegroundColor $extColor
                 }
+                
+                # Show onboarding success information
+                if ($ext.OnboardingSuccess) {
+                    Write-Host "     Onboarding: SUCCESS" -ForegroundColor Green
+                    if ($ext.MachineId) {
+                        Write-Host "     Machine ID: $($ext.MachineId)" -ForegroundColor Gray
+                    }
+                    if ($ext.WorkspaceId) {
+                        Write-Host "     Workspace ID: $($ext.WorkspaceId)" -ForegroundColor Gray
+                    }
+                    if ($ext.OnboardingDetails) {
+                        Write-Host "     Details:" -ForegroundColor Cyan
+                        Write-Host "       • OS: $($ext.OnboardingDetails.osDetails.osName)" -ForegroundColor Gray
+                        Write-Host "       • Azure Resource: $(($ext.OnboardingDetails.azureResourceId -split '/')[-1])" -ForegroundColor Gray
+                        if ($ext.OnboardingDetails.proxyUri) {
+                            Write-Host "       • Proxy: $($ext.OnboardingDetails.proxyUri)" -ForegroundColor Gray
+                        } else {
+                            Write-Host "       • Proxy: Not configured (direct connection)" -ForegroundColor Gray
+                        }
+                    }
+                }
+                
                 if ($ext.HandlerState -and $ext.HandlerState -ne "Unknown") {
                     Write-Host "     Handler State: $($ext.HandlerState)" -ForegroundColor $(if ($ext.HandlerState -eq "Enabled") {"Green"} else {"Yellow"})
                 }
-                if ($ext.ErrorCode) {
+                if ($ext.ErrorCode -and -not $ext.OnboardingSuccess) {
                     Write-Host "     Error Code: $($ext.ErrorCode)" -ForegroundColor Red
                 }
                 if ($ext.ErrorMessage) {
                     Write-Host "     Error: $($ext.ErrorMessage)" -ForegroundColor Red
+                }
+                if ($ext.StatusMessage) {
+                    Write-Host "     Message: $($ext.StatusMessage)" -ForegroundColor Cyan
                 }
                 if ($ext.ConnectivityIssue) {
                     Write-Host "     Issue Detected: Connectivity problem during installation" -ForegroundColor Yellow
@@ -2286,22 +2961,49 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         Write-Host "           - Set LastConnected registry value" -ForegroundColor Gray
         Write-Host ""
         Write-Host ""
-        Write-Host "           Step 4: VERIFY LastConnected VALUE APPEARS" -ForegroundColor Yellow
-        Write-Host "           ------------------------------------------" -ForegroundColor Yellow
-        Write-Host "           Run this PowerShell command to verify cloud connection:" -ForegroundColor Gray
+        Write-Host "           Step 4: VERIFY LastConnected VALUE (Automatic Check)" -ForegroundColor Yellow
+        Write-Host "           -----------------------------------------------------" -ForegroundColor Yellow
+        Write-Host "           Checking current LastConnected status..." -ForegroundColor Gray
         Write-Host ""
-        Write-Host "           Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows Advanced Threat Protection\\Status' | Select-Object LastConnected" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "           SUCCESS: Returns a numeric timestamp value (e.g., 134118086265734088)" -ForegroundColor Green
-        Write-Host "           FAILURE: Returns nothing, blank, or error" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "           If FAILURE after 10 minutes:" -ForegroundColor Yellow
-        Write-Host "           - Re-check firewall rules are applied correctly" -ForegroundColor Gray
-        Write-Host "           - Check DNS resolution: Resolve-DnsName winatp-gw-aue.microsoft.com" -ForegroundColor Gray
-        Write-Host "           - Test connectivity: Test-NetConnection -ComputerName winatp-gw-aue.microsoft.com -Port 443" -ForegroundColor Gray
-        Write-Host "           - Check MDE service logs:" -ForegroundColor Gray
-        Write-Host "             Event Viewer → Applications and Services Logs → Microsoft → Windows → SENSE → Operational" -ForegroundColor DarkGray
-        Write-Host "             Or run: Get-WinEvent -LogName 'Microsoft-Windows-SENSE/Operational' -MaxEvents 20" -ForegroundColor Cyan
+        
+        # Automatically check LastConnected status
+        try {
+            $lastConnectedCheck = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' -Name LastConnected -ErrorAction SilentlyContinue
+            
+            if ($lastConnectedCheck -and $lastConnectedCheck.LastConnected) {
+                Write-Host "           ✅ SUCCESS: LastConnected value EXISTS" -ForegroundColor Green
+                Write-Host "           Value: $($lastConnectedCheck.LastConnected)" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "           This means:" -ForegroundColor Cyan
+                Write-Host "           • MDE successfully connected to Microsoft cloud" -ForegroundColor Gray
+                Write-Host "           • Device identity established" -ForegroundColor Gray
+                Write-Host "           • Portal should recognize this device within 10-15 minutes" -ForegroundColor Gray
+                Write-Host ""
+                Write-Host "           Next Steps:" -ForegroundColor Yellow
+                Write-Host "           1. Wait 10-15 minutes for portal to sync" -ForegroundColor Gray
+                Write-Host "           2. Verify in Azure Portal → Defender for Cloud → Servers" -ForegroundColor Gray
+                Write-Host "           3. Look for server: $($env:COMPUTERNAME)" -ForegroundColor Cyan
+                Write-Host "           4. Status should show: 'Defender for Server: Onboarded'" -ForegroundColor Gray
+            } else {
+                Write-Host "           ❌ FAILURE: LastConnected value is MISSING" -ForegroundColor Red
+                Write-Host "           Registry: HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status" -ForegroundColor Gray
+                Write-Host ""
+                Write-Host "           This means MDE has NOT connected to Microsoft cloud yet" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "           Troubleshooting steps:" -ForegroundColor Yellow
+                Write-Host "           • Wait 10 more minutes and run this script again" -ForegroundColor Gray
+                Write-Host "           • Verify firewall rules are applied correctly" -ForegroundColor Gray
+                Write-Host "           • Check DNS resolution: Resolve-DnsName winatp-gw-aue.microsoft.com" -ForegroundColor Gray
+                Write-Host "           • Test connectivity: Test-NetConnection -ComputerName winatp-gw-aue.microsoft.com -Port 443" -ForegroundColor Gray
+                Write-Host "           • Check MDE service is running: Get-Service Sense" -ForegroundColor Gray
+                Write-Host "           • Review SENSE event logs for connection errors:" -ForegroundColor Gray
+                Write-Host "             Get-WinEvent -LogName 'Microsoft-Windows-SENSE/Operational' -MaxEvents 20" -ForegroundColor Cyan
+            }
+        } catch {
+            Write-Host "           ⚠️  ERROR: Unable to check LastConnected value" -ForegroundColor Yellow
+            Write-Host "           Error: $($_.Exception.Message)" -ForegroundColor Red
+        }
+        
         Write-Host ""
         Write-Host ""
         Write-Host "           Step 5: VERIFY IN AZURE PORTAL" -ForegroundColor Yellow
@@ -2379,11 +3081,29 @@ if ($portalShowsOnboarded) {
     $mdeExtInstalled = $status.Extensions | Where-Object { $_.Name -match "MDE.Windows" -and $_.Installed -eq $true }
     if (-not $mdeExtInstalled) {
         Write-Host "[INFO] MDE Onboarding Method: Manual/Classic (not Arc-managed)" -ForegroundColor Cyan
-        Write-Host "       Device is fully onboarded but Arc extension is not installed" -ForegroundColor Cyan
-        Write-Host "       Portal 'Defender for Server': 'Onboarded' ✓" -ForegroundColor Green
-        Write-Host "       Portal 'Defender for Endpoint': 'Can be onboarded' (Arc extension missing)" -ForegroundColor Yellow
-        Write-Host "       Explanation: Device was onboarded manually, not via Arc extension" -ForegroundColor Cyan
-        Write-Host "                    To use Arc-managed method, install MDE.Windows extension" -ForegroundColor Cyan
+        Write-Host "       Azure Arc: Connected ✓" -ForegroundColor Green
+        Write-Host "       MDE Agent: Onboarded ✓ (manually, not via Arc extension)" -ForegroundColor Green
+        Write-Host "       MDE.Windows Extension: NOT INSTALLED" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "       Portal Status Breakdown:" -ForegroundColor Cyan
+        Write-Host "       ├─ 'Defender for Server': Onboarded ✓" -ForegroundColor Green
+        Write-Host "       ├─ 'Defender for Endpoint': Can be onboarded" -ForegroundColor Yellow
+        Write-Host "       └─ 'Last device update': Shows current date (device IS communicating)" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "       Why 'Can be onboarded' Shows When Device IS Already Onboarded:" -ForegroundColor Yellow
+        Write-Host "         • Portal displays TWO different onboarding statuses:" -ForegroundColor Gray
+        Write-Host "           - 'Defender for Server': Shows manual onboarding status (Onboarded ✓)" -ForegroundColor Gray
+        Write-Host "           - 'Defender for Endpoint': Shows Arc extension status (Can be onboarded)" -ForegroundColor Gray
+        Write-Host "         • 'Can be onboarded' means: MDE.Windows extension can be installed" -ForegroundColor Gray
+        Write-Host "         • 'Last device update' proves device IS working and communicating" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "       Current Configuration:" -ForegroundColor Cyan
+        Write-Host "         ✓ Azure Arc agent: Connected and healthy" -ForegroundColor Green
+        Write-Host "         ✓ MDE agent: Onboarded and communicating (manual method)" -ForegroundColor Green
+        Write-Host "         ℹ MDE.Windows extension: Not installed (optional - alternative method)" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "       Summary: MDE is working correctly - no action required" -ForegroundColor Green
+        Write-Host "                (Arc extension is optional alternative to manual onboarding)" -ForegroundColor Cyan
         Write-Host ""
     }
 }
@@ -2393,12 +3113,15 @@ $mdeExt = $status.Extensions | Where-Object { $_.Name -match "MDE.Windows" }
 if ($mdeExt) {
     $hasMDEIssue = $false
     
-    # Check multiple indicators of failure
-    if ($mdeExt.DetailedStatus -match "(?i)error|failed|transitioning") { $hasMDEIssue = $true }
-    if ($mdeExt.InstallationFailed) { $hasMDEIssue = $true }
-    if ($mdeExt.ConnectivityIssue) { $hasMDEIssue = $true }
-    if ($mdeExt.ErrorMessage -and $mdeExt.ErrorMessage -ne "") { $hasMDEIssue = $true }
-    if ($mdeExt.ErrorCode -and $mdeExt.ErrorCode -ne "" -and $mdeExt.ErrorCode -ne 0) { $hasMDEIssue = $true }
+    # Skip failure detection if onboarding was successful
+    if (-not $mdeExt.OnboardingSuccess) {
+        # Check multiple indicators of failure
+        if ($mdeExt.DetailedStatus -match "(?i)error|failed|transitioning") { $hasMDEIssue = $true }
+        if ($mdeExt.InstallationFailed) { $hasMDEIssue = $true }
+        if ($mdeExt.ConnectivityIssue) { $hasMDEIssue = $true }
+        if ($mdeExt.ErrorMessage -and $mdeExt.ErrorMessage -ne "") { $hasMDEIssue = $true }
+        if ($mdeExt.ErrorCode -and $mdeExt.ErrorCode -ne "" -and $mdeExt.ErrorCode -ne 0) { $hasMDEIssue = $true }
+    }
     
     if ($hasMDEIssue) {
         Write-Host "[CRITICAL] MDE Extension installation/configuration failed" -ForegroundColor Red
@@ -2617,6 +3340,178 @@ if ($status.SystemDrive.FreeSpaceGB -ne $null) {
 
 if (-not $issuesFound) {
     Write-Host "[OK] No critical issues detected" -ForegroundColor Green
+}
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "   FIREWALL WHITELIST ANALYSIS         " -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Check if there are failed mandatory MDE endpoints
+$failedMandatoryEndpoints = @($status.ConnectivityChecks | Where-Object { 
+    $_.Status -eq "Failed" -and ($_.Category -eq "MDE" -or $_.Category -eq "MDE.Windows") -and $_.Mandatory -eq $true 
+})
+
+if ($failedMandatoryEndpoints -and $failedMandatoryEndpoints.Count -gt 0) {
+    Write-Host "ANALYSIS: Comparing failed endpoints against typical firewall whitelist" -ForegroundColor Yellow
+    Write-Host ""
+    
+    # Define what firewall team typically claims to whitelist
+    $typicalWhitelist = @(
+        "*.endpoint.security.microsoft.com"
+        "*.smartscreen-prod.microsoft.com"
+        "*.smartscreen.microsoft.com"
+        "*.checkappexec.microsoft.com"
+        "*.urs.microsoft.com"
+        "go.microsoft.com"
+        "definitionupdates.microsoft.com"
+        "*.update.microsoft.com"
+        "*.delivery.mp.microsoft.com"
+        "*.windowsupdate.com"
+        "*.download.windowsupdate.com"
+        "*.download.microsoft.com"
+        "www.microsoft.com"
+        "ctldl.windowsupdate.com"
+        "crl.microsoft.com"
+        "login.microsoftonline.com"
+        "*.wns.windows.com"
+        "login.live.com"
+        "*.security.microsoft.com"
+        "*.blob.core.windows.net"
+        "login.windows.net"
+        "settings-win.data.microsoft.com"
+        "*.wdcp.microsoft.com"
+        "*.wd.microsoft.com"
+        "au.vortex-win.data.microsoft.com"
+        "au-v20.events.data.microsoft.com"
+        "*.microsoftonline-p.com"
+        "secure.aadcdn.microsoftonline-p.com"
+        "static2.sharepointonline.com"
+        "*.securitycenter.windows.com"
+        "*.api.security.microsoft.com"
+        "security.microsoft.com"
+        "x.cp.wd.microsoft.com"
+    )
+    
+    # Check each failed endpoint
+    $missingFromWhitelist = @()
+    
+    foreach ($endpoint in $failedMandatoryEndpoints) {
+        $url = $endpoint.URL -replace "https://", "" -replace "http://", "" -replace ":443", "" -replace ":80", ""
+        $hostname = $url
+        
+        # Check if this hostname matches any whitelist pattern
+        $isWhitelisted = $false
+        foreach ($pattern in $typicalWhitelist) {
+            # Convert wildcard pattern to regex
+            $regexPattern = "^" + ($pattern -replace "\.", "\." -replace "\*", ".*") + "$"
+            if ($hostname -match $regexPattern) {
+                $isWhitelisted = $true
+                break
+            }
+        }
+        
+        if (-not $isWhitelisted) {
+            $missingFromWhitelist += [PSCustomObject]@{
+                URL = $endpoint.URL
+                Hostname = $hostname
+                Purpose = $endpoint.Description
+            }
+        }
+    }
+    
+    if ($missingFromWhitelist.Count -gt 0) {
+        Write-Host "🔴 CRITICAL FINDING: Missing URLs in Firewall Whitelist" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "   The following MANDATORY MDE endpoints are FAILING connectivity tests" -ForegroundColor Red
+        Write-Host "   but are NOT covered by typical firewall whitelist patterns:" -ForegroundColor Red
+        Write-Host ""
+        
+        foreach ($missing in $missingFromWhitelist) {
+            Write-Host "   ❌ $($missing.URL)" -ForegroundColor Red
+            if ($missing.Purpose) {
+                Write-Host "      Purpose: $($missing.Purpose)" -ForegroundColor Gray
+            }
+            Write-Host "      Status: NOT whitelisted - Add to firewall rules" -ForegroundColor Yellow
+            Write-Host ""
+        }
+        
+        Write-Host "   ACTION REQUIRED: Add these URLs to firewall whitelist" -ForegroundColor Yellow
+        Write-Host "   ───────────────────────────────────────────────────────" -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Extract unique wildcard patterns needed
+        $neededPatterns = @()
+        foreach ($missing in $missingFromWhitelist) {
+            $hostname = $missing.Hostname
+            
+            # Suggest wildcard pattern
+            if ($hostname -match "winatp-gw-.*\.microsoft\.com") {
+                $pattern = "winatp-gw-*.microsoft.com"
+            } elseif ($hostname -match "edr-.*\.endpoint\.security\.microsoft\.com") {
+                $pattern = "edr-*.*.endpoint.security.microsoft.com"
+            } elseif ($hostname -match ".*\.events\.data\.microsoft\.com") {
+                $pattern = "*.events.data.microsoft.com"
+            } elseif ($hostname -eq "events.data.microsoft.com") {
+                $pattern = "events.data.microsoft.com"
+            } elseif ($hostname -match "cdn\..*\.cp\.wd\.microsoft\.com") {
+                $pattern = "cdn.*.cp.wd.microsoft.com"
+            } elseif ($hostname -match ".*\.cp\.wd\.microsoft\.com") {
+                $pattern = "*.cp.wd.microsoft.com"
+            } else {
+                $pattern = $hostname
+            }
+            
+            if ($neededPatterns -notcontains $pattern) {
+                $neededPatterns += $pattern
+            }
+        }
+        
+        Write-Host "   Firewall Rules to Add (Wildcard Patterns):" -ForegroundColor Cyan
+        foreach ($pattern in $neededPatterns) {
+            Write-Host "   • $pattern" -ForegroundColor Green
+        }
+        Write-Host ""
+        Write-Host "   Configuration Example:" -ForegroundColor Cyan
+        Write-Host "   Protocol: HTTPS" -ForegroundColor Gray
+        Write-Host "   Port: 443" -ForegroundColor Gray
+        Write-Host "   Direction: Outbound" -ForegroundColor Gray
+        Write-Host "   Action: Allow" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "   After adding rules:" -ForegroundColor Yellow
+        Write-Host "   1. Verify rules are applied: Test-NetConnection <endpoint> -Port 443" -ForegroundColor Gray
+        Write-Host "   2. Restart MDE service: Restart-Service Sense -Force" -ForegroundColor Gray
+        Write-Host "   3. Wait 5-10 minutes for cloud connection" -ForegroundColor Gray
+        Write-Host "   4. Re-run this script to verify connectivity" -ForegroundColor Gray
+        Write-Host ""
+        
+    } else {
+        Write-Host "✅ All failed mandatory endpoints ARE covered by typical whitelist patterns" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "   Problem: Firewall rules may be configured but not applied correctly" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "   Possible Issues:" -ForegroundColor Cyan
+        Write-Host "   • Rules configured but not activated/pushed to devices" -ForegroundColor Gray
+        Write-Host "   • Proxy authentication required but not configured" -ForegroundColor Gray
+        Write-Host "   • DNS resolution failing for these domains" -ForegroundColor Gray
+        Write-Host "   • Intermediate proxy/firewall blocking traffic" -ForegroundColor Gray
+        Write-Host "   • SSL inspection breaking HTTPS connections" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "   Troubleshooting Steps:" -ForegroundColor Cyan
+        Write-Host "   1. Verify firewall rules are actually applied on the network path" -ForegroundColor Gray
+        Write-Host "   2. Check DNS resolution: Resolve-DnsName <failed-endpoint>" -ForegroundColor Gray
+        Write-Host "   3. Test from server: Test-NetConnection <endpoint> -Port 443" -ForegroundColor Gray
+        Write-Host "   4. Check proxy configuration: netsh winhttp show proxy" -ForegroundColor Gray
+        Write-Host "   5. Test with curl: curl -v https://<endpoint>" -ForegroundColor Gray
+        Write-Host "   6. Check if SSL inspection is interfering" -ForegroundColor Gray
+        Write-Host ""
+    }
+    
+} else {
+    Write-Host "✅ No mandatory MDE endpoint connectivity failures detected" -ForegroundColor Green
+    Write-Host "   All critical URLs are reachable" -ForegroundColor Gray
+    Write-Host ""
 }
 
 Write-Host ""
