@@ -3,7 +3,7 @@
 # Run as Administrator
 #
 # Usage: .\ValidateArcMDE.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"]
-# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId ""
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9"
 # Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "8769b673-6805-6789-8f77-12345f4d22b9" -Region "US"
 
 <#
@@ -63,6 +63,26 @@ if ([string]::IsNullOrWhiteSpace($Region)) {
     $Region = "Australia"
     Write-Host "Region parameter was empty, defaulting to: Australia" -ForegroundColor Yellow
     Write-Host ""
+}
+
+# Function to convert Windows FILETIME to readable DateTime
+function Convert-FileTimeToDateTime {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FileTime
+    )
+    
+    try {
+        # Convert string to Int64
+        $fileTimeValue = [Int64]$FileTime
+        
+        # Convert FILETIME (100-nanosecond intervals since 1601-01-01) to DateTime
+        $dateTime = [DateTime]::FromFileTime($fileTimeValue)
+        
+        return $dateTime
+    } catch {
+        return $null
+    }
 }
 
 Write-Host "=== Azure Arc-Enabled Server Status Check ===" -ForegroundColor Cyan
@@ -434,6 +454,11 @@ try {
         # Get LastConnected timestamp if available
         if ($onboardingInfo.PSObject.Properties.Name -contains 'LastConnected') {
             $status.MDE.LastConnected = $onboardingInfo.LastConnected
+            # Convert FILETIME to readable DateTime
+            $lastConnectedDateTime = Convert-FileTimeToDateTime -FileTime $onboardingInfo.LastConnected
+            if ($lastConnectedDateTime) {
+                $status.MDE.LastConnectedDateTime = $lastConnectedDateTime
+            }
         }
     } else {
         $status.MDE.OrgId = "Not Available"
@@ -1727,8 +1752,21 @@ if ($status.MDE.OrgId -and $status.MDE.OrgId -ne "Not Available" -and $status.MD
 } else {
     Write-Host "     Organization ID:  $($status.MDE.OrgId)" -ForegroundColor Yellow
 }
-if ($status.MDE.LastConnected) {
-    Write-Host "     Last Connected:   $($status.MDE.LastConnected)" -ForegroundColor Cyan
+if ($status.MDE.LastConnected -and $status.MDE.LastConnected -ne "0" -and $status.MDE.LastConnected -ne 0) {
+    if ($status.MDE.LastConnectedDateTime) {
+        Write-Host "     Last Connected:   $($status.MDE.LastConnectedDateTime)" -ForegroundColor Cyan
+        Write-Host "                       (Raw: $($status.MDE.LastConnected))" -ForegroundColor DarkGray
+    } else {
+        Write-Host "     Last Connected:   $($status.MDE.LastConnected) (Unable to convert)" -ForegroundColor Cyan
+    }
+} else {
+    if ([string]::IsNullOrWhiteSpace($status.MDE.LastConnected)) {
+        Write-Host "     Last Connected:   MISSING - Device has not connected to cloud" -ForegroundColor Red
+    } elseif ($status.MDE.LastConnected -eq "0" -or $status.MDE.LastConnected -eq 0) {
+        Write-Host "     Last Connected:   INVALID (0) - Device has not connected to cloud" -ForegroundColor Red
+    } else {
+        Write-Host "     Last Connected:   ERROR - $($status.MDE.LastConnected)" -ForegroundColor Red
+    }
 }
 if ($status.MDE.CyberFolderState) {
     Write-Host "     Cyber Folder:     $($status.MDE.CyberFolderState)" -ForegroundColor Cyan
@@ -2970,9 +3008,17 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         try {
             $lastConnectedCheck = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' -Name LastConnected -ErrorAction SilentlyContinue
             
-            if ($lastConnectedCheck -and $lastConnectedCheck.LastConnected) {
+            if ($lastConnectedCheck -and $lastConnectedCheck.LastConnected -and $lastConnectedCheck.LastConnected -ne 0) {
+                # Convert FILETIME to readable DateTime
+                $lastConnectedDateTime = Convert-FileTimeToDateTime -FileTime $lastConnectedCheck.LastConnected
+                
                 Write-Host "           ✅ SUCCESS: LastConnected value EXISTS" -ForegroundColor Green
-                Write-Host "           Value: $($lastConnectedCheck.LastConnected)" -ForegroundColor Green
+                if ($lastConnectedDateTime) {
+                    Write-Host "           Date/Time: $lastConnectedDateTime" -ForegroundColor Green
+                    Write-Host "           Raw Value: $($lastConnectedCheck.LastConnected)" -ForegroundColor DarkGray
+                } else {
+                    Write-Host "           Raw Value: $($lastConnectedCheck.LastConnected)" -ForegroundColor Green
+                }
                 Write-Host ""
                 Write-Host "           This means:" -ForegroundColor Cyan
                 Write-Host "           • MDE successfully connected to Microsoft cloud" -ForegroundColor Gray
@@ -3026,7 +3072,25 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         Write-Host "          VERIFIED STATUS:" -ForegroundColor Green
         Write-Host "          ===============" -ForegroundColor Green
         Write-Host "          Registry OnboardingState: 1 (Onboarded) [OK]" -ForegroundColor Green
-        Write-Host "          Registry LastConnected: $($status.MDE.LastConnected) [OK]" -ForegroundColor Green
+        
+        # Display LastConnected with readable DateTime
+        if ($status.MDE.LastConnected -and $status.MDE.LastConnected -ne "0" -and $status.MDE.LastConnected -ne 0) {
+            if ($status.MDE.LastConnectedDateTime) {
+                Write-Host "          Registry LastConnected: $($status.MDE.LastConnectedDateTime) [OK]" -ForegroundColor Green
+                Write-Host "                                  (Raw: $($status.MDE.LastConnected))" -ForegroundColor DarkGray
+            } else {
+                Write-Host "          Registry LastConnected: $($status.MDE.LastConnected) (Unable to convert) [WARNING]" -ForegroundColor Yellow
+            }
+        } else {
+            if ([string]::IsNullOrWhiteSpace($status.MDE.LastConnected)) {
+                Write-Host "          Registry LastConnected: MISSING [ERROR]" -ForegroundColor Red
+            } elseif ($status.MDE.LastConnected -eq "0" -or $status.MDE.LastConnected -eq 0) {
+                Write-Host "          Registry LastConnected: INVALID (0) [ERROR]" -ForegroundColor Red
+            } else {
+                Write-Host "          Registry LastConnected: ERROR ($($status.MDE.LastConnected)) [ERROR]" -ForegroundColor Red
+            }
+        }
+        
         Write-Host "          Portal Status: 'Defender for Server: Onboarded' [OK]" -ForegroundColor Green
         Write-Host ""
         
