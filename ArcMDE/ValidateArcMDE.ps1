@@ -3,8 +3,8 @@
 # Run as Administrator
 #
 # Usage: .\ValidateArcMDE.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"]
-# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "bea9b673-6805-4d37-8f77-d45f8f4d22b9"
-# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "bea9b673-6805-4d37-8f77-d45f8f4d22b9" -Region "US"
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" -Region "US"
 
 <#
 .SYNOPSIS
@@ -45,7 +45,7 @@
 param(
     [Parameter(
         Mandatory=$true,
-        HelpMessage="Enter the expected MDE Organization ID GUID (example: 'bea9b673-6805-4d37-8f77-d45f8f4d22b9')"
+        HelpMessage="Enter the expected MDE Organization ID GUID (example: 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX')"
     )]
     [ValidateNotNullOrEmpty()]
     [string]$ExpectedOrgId,
