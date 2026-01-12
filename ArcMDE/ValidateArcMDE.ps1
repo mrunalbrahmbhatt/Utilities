@@ -3,8 +3,8 @@
 # Run as Administrator
 #
 # Usage: .\ValidateArcMDE.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"]
-# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
-# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" -Region "US"
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "bea9b673-6805-4d37-8f77-d45f8f4d22b9"
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "bea9b673-6805-4d37-8f77-d45f8f4d22b9" -Region "US"
 
 <#
 .SYNOPSIS
@@ -45,7 +45,7 @@
 param(
     [Parameter(
         Mandatory=$true,
-        HelpMessage="Enter the expected MDE Organization ID GUID (example: 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX')"
+        HelpMessage="Enter the expected MDE Organization ID GUID (example: 'bea9b673-6805-4d37-8f77-d45f8f4d22b9')"
     )]
     [ValidateNotNullOrEmpty()]
     [string]$ExpectedOrgId,
@@ -55,7 +55,13 @@ param(
         HelpMessage="Select your Azure region for MDE connectivity checks"
     )]
     [ValidateSet("Australia", "US", "Europe", "UK", "Canada", "Asia")]
-    [string]$Region = "Australia"
+    [string]$Region = "Australia",
+    
+    [Parameter(
+        Mandatory=$false,
+        HelpMessage="Skip Azure Arc agent validation checks"
+    )]
+    [switch]$SkipArc = $false
 )
 
 # Ensure Region has a valid value (defense against empty strings)
@@ -89,6 +95,9 @@ Write-Host "=== Azure Arc-Enabled Server Status Check ===" -ForegroundColor Cyan
 Write-Host "Server: $($env:COMPUTERNAME)" -ForegroundColor Yellow
 Write-Host "Current Date: $(Get-Date)" -ForegroundColor Yellow
 Write-Host "Region: $Region" -ForegroundColor Yellow
+if ($SkipArc) {
+    Write-Host "Arc Validation: SKIPPED" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Collecting status information..." -ForegroundColor Cyan
 Write-Host ""
@@ -108,7 +117,7 @@ $azcmagentPath = "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe"
 $certsPath = "$env:ProgramData\AzureConnectedMachineAgent\Certs"
 
 # Section 1: Collect Azure Arc Agent Info
-if (Test-Path $azcmagentPath) {
+if (-not $SkipArc -and (Test-Path $azcmagentPath)) {
     $status.ArcAgent.Installed = $true
     
     $showOutput = & $azcmagentPath show 2>$null
@@ -279,8 +288,10 @@ if (Test-Path $azcmagentPath) {
     } else {
         $status.Certificates += @{ Status = "Certificate folder not found" }
     }
-} else {
+} elseif (-not $SkipArc) {
     $status.ArcAgent.Installed = $false
+} else {
+    $status.ArcAgent.Installed = "Skipped"
 }
 
 # Section 2: Collect MDE Sensor Info
@@ -438,7 +449,24 @@ try {
         # OnboardingState = 1 means onboarded
         if ($onboardingInfo.PSObject.Properties.Name -contains 'OnboardingState') {
             if ($onboardingInfo.OnboardingState -eq 1) {
-                $onboardingState = "Onboarded"
+                # Check if OrgId exists - required for valid onboarding
+                $hasOrgId = $onboardingInfo.PSObject.Properties.Name -contains 'OrgId' -and 
+                            $onboardingInfo.OrgId -and 
+                            $onboardingInfo.OrgId -ne ""
+                
+                if (-not $hasOrgId) {
+                    # OnboardingState=1 but no OrgId = Incomplete/Failed onboarding
+                    $onboardingState = "Onboarding Incomplete/Failed"
+                } elseif ($onboardingInfo.PSObject.Properties.Name -contains 'LastConnected' -and 
+                          $onboardingInfo.LastConnected -and 
+                          $onboardingInfo.LastConnected -ne "0" -and 
+                          $onboardingInfo.LastConnected -ne 0) {
+                    # Has OrgId AND LastConnected = Fully onboarded
+                    $onboardingState = "Onboarded"
+                } else {
+                    # Has OrgId but no LastConnected = Onboarded locally, never reached cloud
+                    $onboardingState = "Onboarded Locally (Never Connected)"
+                }
             } elseif ($onboardingInfo.OnboardingState -eq 0) {
                 $onboardingState = "Not Onboarded"
             }
@@ -898,13 +926,23 @@ if ($status.MDE.OnboardingState -eq "Onboarded") {
         $streamlinedConfigured = $false
         $standardConfigured = $false
         
-        # Test connectivity to streamlined domain
-        $streamlinedDomain = "endpoint.security.microsoft.com"
+        # Test connectivity to streamlined domain (region-specific EDR endpoint)
+        # Map regions to their EDR endpoints (these are the streamlined connectivity endpoints)
+        $streamlinedEndpoints = @{
+            "Australia" = "edr-aue.au.endpoint.security.microsoft.com"
+            "US" = "edr-eus.us.endpoint.security.microsoft.com"
+            "Europe" = "edr-weu.eu.endpoint.security.microsoft.com"
+            "UK" = "edr-uks.uk.endpoint.security.microsoft.com"
+            "Canada" = "edr-cac.ca.endpoint.security.microsoft.com"
+            "Asia" = "edr-eas.asia.endpoint.security.microsoft.com"
+        }
+        
+        $streamlinedDomain = $streamlinedEndpoints[$Region]
         $streamlinedTest = Test-NetConnection -ComputerName $streamlinedDomain -Port 443 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
         
         if ($streamlinedTest.TcpTestSucceeded) {
             $status.MDE.StreamlinedConnectivity.CurrentlyUsing.StreamlinedDomain = "Reachable"
-            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Streamlined domain ($streamlinedDomain) is reachable"
+            $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Streamlined domain ($streamlinedDomain) is reachable for $Region region"
         } else {
             $status.MDE.StreamlinedConnectivity.CurrentlyUsing.StreamlinedDomain = "Unreachable"
         }
@@ -1626,8 +1664,14 @@ Write-Host "         STATUS REPORT SUMMARY          " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
+# ==================== SYSTEM INFORMATION ====================
+Write-Host "╔════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║     SYSTEM INFORMATION                 ║" -ForegroundColor Cyan
+Write-Host "╚════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+
 # Report 0: Operating System Information
-Write-Host "OPERATING SYSTEM INFORMATION" -ForegroundColor Green
+Write-Host "OPERATING SYSTEM" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 if ($status.OperatingSystem.Caption) {
     Write-Host "   OS Name:          $($status.OperatingSystem.Caption)" -ForegroundColor Cyan
@@ -1645,11 +1689,20 @@ if ($status.OperatingSystem.Caption) {
 }
 Write-Host ""
 
+# ==================== AZURE ARC CHECKS ====================
+if (-not $SkipArc) {
+    Write-Host "╔════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "║     AZURE ARC CHECKS                   ║" -ForegroundColor Cyan
+    Write-Host "╚════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host ""
+}
+
 # Report 1: Azure Arc Agent
-Write-Host "1. AZURE ARC AGENT" -ForegroundColor Green
-Write-Host "   ----------------------------------------"
-if ($status.ArcAgent.Installed) {
-    Write-Host "   Agent Installed:  YES" -ForegroundColor Green
+if (-not $SkipArc) {
+    Write-Host "1. AZURE ARC AGENT" -ForegroundColor Green
+    Write-Host "   ----------------------------------------"
+    if ($status.ArcAgent.Installed) {
+        Write-Host "   Agent Installed:  YES" -ForegroundColor Green
     Write-Host "   Agent Status:     $($status.ArcAgent.Status)" -ForegroundColor $(if ($status.ArcAgent.Status -match "Connected") {"Green"} elseif ($status.ArcAgent.Status -match "Disconnected|Expired") {"Red"} else {"Yellow"})
     
     if ($status.ArcAgent.LastHeartbeat) {
@@ -1693,42 +1746,53 @@ if ($status.ArcAgent.Installed) {
     } else {
         Write-Host "     (Unable to retrieve service status)" -ForegroundColor Gray
     }
-} else {
-    Write-Host "   Agent Installed:  NO" -ForegroundColor Red
+    } else {
+        Write-Host "   Agent Installed:  NO" -ForegroundColor Red
+    }
+    Write-Host ""
 }
-Write-Host ""
 
 # Report 2: Certificates
-Write-Host "2. MANAGED IDENTITY CERTIFICATES" -ForegroundColor Green
-Write-Host "   ----------------------------------------"
-$criticalCerts = @()
-$warnCerts = @()
-foreach ($cert in $status.Certificates) {
-    if ($cert.Status) {
-        if ($cert.Status -eq "No certificates found" -or $cert.Status -eq "Certificate folder not found") {
-            Write-Host "   $($cert.Status)" -ForegroundColor Yellow
-        } elseif ($cert.Status -eq "EXPIRED") {
-            Write-Host "   [$($cert.FileName)]" -ForegroundColor Red
-            Write-Host "     Status: EXPIRED ($($cert.DaysRemaining) days overdue)" -ForegroundColor Red
-            Write-Host "     Expired: $($cert.ExpiryDate)" -ForegroundColor Red
-            $criticalCerts += $cert.FileName
-        } elseif ($cert.Status -eq "Expiring Soon") {
-            Write-Host "   [$($cert.FileName)]" -ForegroundColor Yellow
-            Write-Host "     Status: Expiring Soon ($($cert.DaysRemaining) days left)" -ForegroundColor Yellow
-            Write-Host "     Expires: $($cert.ExpiryDate)" -ForegroundColor Yellow
-            $warnCerts += $cert.FileName
-        } elseif ($cert.Status -eq "Valid") {
-            Write-Host "   [$($cert.FileName)]" -ForegroundColor Green
-            Write-Host "     Status: Valid ($($cert.DaysRemaining) days remaining)" -ForegroundColor Green
-        } elseif ($cert.Status -eq "Error") {
-            Write-Host "   [$($cert.FileName)] Error: $($cert.Error)" -ForegroundColor Red
+if (-not $SkipArc) {
+    $certSectionNumber = if ($SkipArc) { "1" } else { "2" }
+    Write-Host "${certSectionNumber}. MANAGED IDENTITY CERTIFICATES" -ForegroundColor Green
+    Write-Host "   ----------------------------------------"
+    $criticalCerts = @()
+    $warnCerts = @()
+    foreach ($cert in $status.Certificates) {
+        if ($cert.Status) {
+            if ($cert.Status -eq "No certificates found" -or $cert.Status -eq "Certificate folder not found") {
+                Write-Host "   $($cert.Status)" -ForegroundColor Yellow
+            } elseif ($cert.Status -eq "EXPIRED") {
+                Write-Host "   [$($cert.FileName)]" -ForegroundColor Red
+                Write-Host "     Status: EXPIRED ($($cert.DaysRemaining) days overdue)" -ForegroundColor Red
+                Write-Host "     Expired: $($cert.ExpiryDate)" -ForegroundColor Red
+                $criticalCerts += $cert.FileName
+            } elseif ($cert.Status -eq "Expiring Soon") {
+                Write-Host "   [$($cert.FileName)]" -ForegroundColor Yellow
+                Write-Host "     Status: Expiring Soon ($($cert.DaysRemaining) days left)" -ForegroundColor Yellow
+                Write-Host "     Expires: $($cert.ExpiryDate)" -ForegroundColor Yellow
+                $warnCerts += $cert.FileName
+            } elseif ($cert.Status -eq "Valid") {
+                Write-Host "   [$($cert.FileName)]" -ForegroundColor Green
+                Write-Host "     Status: Valid ($($cert.DaysRemaining) days remaining)" -ForegroundColor Green
+            } elseif ($cert.Status -eq "Error") {
+                Write-Host "   [$($cert.FileName)] Error: $($cert.Error)" -ForegroundColor Red
+            }
         }
     }
+    Write-Host ""
 }
+
+# ==================== MICROSOFT DEFENDER FOR ENDPOINT CHECKS ====================
+Write-Host "╔════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║  MICROSOFT DEFENDER FOR ENDPOINT       ║" -ForegroundColor Cyan
+Write-Host "╚════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
 # Report 3: MDE Onboarding
-Write-Host "3. MICROSOFT DEFENDER FOR ENDPOINT - ONBOARDING" -ForegroundColor Green
+$mdeSectionNumber = if ($SkipArc) { "1" } else { "3" }
+Write-Host "${mdeSectionNumber}. MICROSOFT DEFENDER FOR ENDPOINT - ONBOARDING" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 Write-Host "   Installation:" -ForegroundColor Cyan
 Write-Host "     Install Path:     $($status.MDE.InstallPath)" -ForegroundColor $(if ($status.MDE.InstallPath -eq "Exists") {"Green"} else {"Red"})
@@ -1742,11 +1806,17 @@ if ($status.MDE.SenseHealthState -ne "Unknown") {
 }
 Write-Host ""
 Write-Host "   Onboarding Status:" -ForegroundColor Cyan
-Write-Host "     Onboarding State: $($status.MDE.OnboardingState)" -ForegroundColor $(if ($status.MDE.OnboardingState -match "Onboarded") {"Green"} else {"Yellow"})
+$onboardingColor = if ($status.MDE.OnboardingState -eq "Onboarded") {"Green"} elseif ($status.MDE.OnboardingState -match "Onboarded Locally") {"Yellow"} elseif ($status.MDE.OnboardingState -match "Incomplete|Failed") {"Red"} else {"Red"}
+Write-Host "     Onboarding State: $($status.MDE.OnboardingState)" -ForegroundColor $onboardingColor
+if ($status.MDE.OnboardingState -match "Never Connected") {
+    Write-Host "                       Note: Registry shows onboarded but no cloud connection established" -ForegroundColor Yellow
+} elseif ($status.MDE.OnboardingState -match "Incomplete|Failed") {
+    Write-Host "                       Note: OnboardingState=1 but missing Organization ID (onboarding script failed)" -ForegroundColor Red
+}
 if ($status.MDE.OrgId -and $status.MDE.OrgId -ne "Not Available" -and $status.MDE.OrgId -ne "Error") {
     Write-Host "     Organization ID:  $($status.MDE.OrgId)" -ForegroundColor Cyan
     if ($status.MDE.OrgId -ne $ExpectedOrgId) {
-        Write-Host "                       WARNING: Does not match expected ID!" -ForegroundColor Red
+        Write-Host "                       CRITICAL: Does not match expected ID!" -ForegroundColor Red
         Write-Host "                       Expected: $ExpectedOrgId" -ForegroundColor Yellow
     }
 } else {
@@ -1792,7 +1862,7 @@ if ($status.MDE.RealTimeProtection -ne "Unknown") {
 Write-Host ""
 
 # Report 3.1: MDE COMPREHENSIVE HEALTH VALIDATION
-Write-Host "3.1 MDE COMPREHENSIVE HEALTH CHECK" -ForegroundColor Green
+Write-Host "${mdeSectionNumber}.1 MDE COMPREHENSIVE HEALTH CHECK" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 
 # Perform comprehensive validation
@@ -1826,11 +1896,11 @@ if ($status.MDE.MsSenseProcess) {
     $mdeIssues += "MsSense.exe process not running"
 }
 
-# Check 3: Onboarded
-if ($status.MDE.OnboardingState -match "Onboarded") {
+# Check 3: Onboarded (registry state AND has OrgId)
+if ($status.MDE.OnboardingState -eq "Onboarded" -or $status.MDE.OnboardingState -match "Onboarded Locally") {
     $mdeHealthChecks.Onboarded = $true
 } else {
-    $mdeIssues += "MDE not onboarded"
+    $mdeIssues += "MDE not onboarded (State: $($status.MDE.OnboardingState))"
 }
 
 # Check 4: Cloud Connected
@@ -1863,9 +1933,13 @@ if ($status.MDE.RealTimeProtection -eq "Enabled") {
     $mdeIssues += "Real-time protection disabled"
 }
 
-# Check 7: Cloud Protection (MAPS)
+# Check 7: Cloud Protection (MAPS) - Optional for streamlined connectivity
 if ($status.MDE.MAPSReporting -match "Basic|Advanced") {
     $mdeHealthChecks.CloudProtectionOn = $true
+} elseif ($status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional -eq $true) {
+    # MAPS is optional when streamlined connectivity is working
+    $mdeHealthChecks.CloudProtectionOn = $true  # Don't fail check
+    $mdeIssues += "[OPTIONAL] MAPS disabled, but streamlined connectivity covers MDE cloud protection"
 } else {
     $mdeIssues += "Cloud-delivered protection disabled (MAPS: $($status.MDE.MAPSReporting))"
 }
@@ -1882,19 +1956,27 @@ if ($status.MDE.NetworkRealtimeInspectionEnabled -eq "Enabled") {
     $mdeHealthChecks.NetworkProtectionOn = $true
 }
 
-# Check 10: Telemetry
+# Check 10: Telemetry - Consider streamlined connectivity
 if ($status.MDE.MAPSReporting -ne "Disabled" -and $status.MDE.MAPSReporting -ne "Unknown") {
+    $mdeHealthChecks.TelemetryEnabled = $true
+} elseif ($status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional -eq $true) {
+    # Streamlined connectivity handles telemetry through EDR endpoints
     $mdeHealthChecks.TelemetryEnabled = $true
 }
 
 # Check 11: Gateway Connectivity (from existing checks)
-$mdeGatewayPassed = $status.ConnectivityChecks | Where-Object { 
+$mdeGatewayAll = @($status.ConnectivityChecks | Where-Object { 
     $_.Category -eq "MDE" -and 
-    $_.URL -like "*winatp-gw-*" -and 
-    $_.Status -eq "Passed" 
-}
-if ($mdeGatewayPassed) {
+    $_.URL -like "*winatp-gw-*"
+})
+$mdeGatewayPassed = @($mdeGatewayAll | Where-Object { $_.Status -eq "Passed" })
+
+if ($mdeGatewayPassed.Count -gt 0) {
     $mdeHealthChecks.GatewayReachable = $true
+    # Warn if only partial gateway connectivity
+    if ($mdeGatewayAll.Count -gt 0 -and $mdeGatewayPassed.Count -lt $mdeGatewayAll.Count) {
+        $mdeIssues += "Partial gateway connectivity ($($mdeGatewayPassed.Count)/$($mdeGatewayAll.Count) gateways reachable)"
+    }
 } else {
     $mdeIssues += "MDE gateway endpoints not reachable"
 }
@@ -1919,11 +2001,15 @@ Write-Host ""
 Write-Host "   Detailed Health Checks:" -ForegroundColor Cyan
 Write-Host "     [$(if ($mdeHealthChecks.ServiceRunning) {'✓'} else {'✗'})] Sense Service Running" -ForegroundColor $(if ($mdeHealthChecks.ServiceRunning) {"Green"} else {"Red"})
 Write-Host "     [$(if ($mdeHealthChecks.ProcessRunning) {'✓'} else {'✗'})] MsSense Process Active" -ForegroundColor $(if ($mdeHealthChecks.ProcessRunning) {"Green"} else {"Red"})
-Write-Host "     [$(if ($mdeHealthChecks.Onboarded) {'✓'} else {'✗'})] MDE Onboarded (Registry)" -ForegroundColor $(if ($mdeHealthChecks.Onboarded) {"Green"} else {"Red"})
+Write-Host "     [$(if ($mdeHealthChecks.Onboarded) {'✓'} else {'✗'})] MDE Onboarded (Registry State = 1)" -ForegroundColor $(if ($mdeHealthChecks.Onboarded) {"Green"} else {"Red"})
 Write-Host "     [$(if ($mdeHealthChecks.CloudConnected) {'✓'} else {'✗'})] Cloud Connection Established" -ForegroundColor $(if ($mdeHealthChecks.CloudConnected) {"Green"} else {"Red"})
 Write-Host "     [$(if ($mdeHealthChecks.SignaturesFresh) {'✓'} else {'✗'})] Signatures Up-to-Date (<7 days)" -ForegroundColor $(if ($mdeHealthChecks.SignaturesFresh) {"Green"} else {"Red"})
 Write-Host "     [$(if ($mdeHealthChecks.RealTimeProtectionOn) {'✓'} else {'✗'})] Real-Time Protection Enabled" -ForegroundColor $(if ($mdeHealthChecks.RealTimeProtectionOn) {"Green"} else {"Red"})
-Write-Host "     [$(if ($mdeHealthChecks.CloudProtectionOn) {'✓'} else {'✗'})] Cloud-Delivered Protection (MAPS)" -ForegroundColor $(if ($mdeHealthChecks.CloudProtectionOn) {"Green"} else {"Red"})
+# Show MAPS status with context about streamlined
+    $mapsIcon = if ($mdeHealthChecks.CloudProtectionOn) {'✓'} elseif ($status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional) {'i'} else {'✗'}
+    $mapsColor = if ($mdeHealthChecks.CloudProtectionOn) {"Green"} elseif ($status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional) {"Cyan"} else {"Red"}
+    $mapsLabel = if ($status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional -and $status.MDE.MAPSReporting -notmatch "Basic|Advanced") { "Cloud-Delivered Protection (MAPS - Optional with Streamlined)" } else { "Cloud-Delivered Protection (MAPS)" }
+    Write-Host "     [$mapsIcon] $mapsLabel" -ForegroundColor $mapsColor
 Write-Host "     [$(if ($mdeHealthChecks.BehaviorMonitorOn) {'✓'} else {'✗'})] Behavior Monitoring Enabled" -ForegroundColor $(if ($mdeHealthChecks.BehaviorMonitorOn) {"Green"} else {"Red"})
 Write-Host "     [$(if ($mdeHealthChecks.NetworkProtectionOn) {'✓'} else {'i'})] Network Inspection Enabled" -ForegroundColor $(if ($mdeHealthChecks.NetworkProtectionOn) {"Green"} else {"Gray"})
 Write-Host "     [$(if ($mdeHealthChecks.TelemetryEnabled) {'✓'} else {'✗'})] Telemetry Enabled" -ForegroundColor $(if ($mdeHealthChecks.TelemetryEnabled) {"Green"} else {"Yellow"})
@@ -2071,14 +2157,21 @@ if ($mdeIssues.Count -gt 0) {
         Write-Host "       Note: Group Policy may override this setting" -ForegroundColor Yellow
     }
     
-    # Action 7: Cloud protection disabled
-    if (-not $mdeHealthChecks.CloudProtectionOn) {
+    # Action 7: Cloud protection disabled (skip if streamlined is working)
+    if (-not $mdeHealthChecks.CloudProtectionOn -and -not $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional) {
         Write-Host ""
         Write-Host "   [7] Fix: Cloud-Delivered Protection Disabled" -ForegroundColor Yellow
         Write-Host "       Enable MAPS Reporting:" -ForegroundColor White
         Write-Host "       Set-MpPreference -MAPSReporting Advanced" -ForegroundColor White
         Write-Host "       Verify: Get-MpComputerStatus | Select-Object MAPSReporting" -ForegroundColor Gray
         Write-Host "       Note: Requires network connectivity to Microsoft cloud" -ForegroundColor Yellow
+    } elseif (-not $mdeHealthChecks.CloudProtectionOn -and $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional) {
+        Write-Host ""
+        Write-Host "   [INFO] MAPS Not Configured (Optional with Streamlined Connectivity)" -ForegroundColor Cyan
+        Write-Host "         MDE cloud protection is working via streamlined connectivity" -ForegroundColor Gray
+        Write-Host "         MAPS is a Windows Defender AV feature, not required for MDE EDR" -ForegroundColor Gray
+        Write-Host "         Optional: Enable for additional AV cloud features" -ForegroundColor Gray
+        Write-Host "         Set-MpPreference -MAPSReporting Advanced" -ForegroundColor DarkGray
     }
     
     # Action 8: Behavior monitoring disabled
@@ -2173,7 +2266,7 @@ if ($healthPercentage -ge 90) {
 Write-Host ""
 
 # Report 3.2: Additional MDE Onboarding Validation (Microsoft Documentation Checks)
-Write-Host "3.2 ADDITIONAL MDE ONBOARDING VALIDATION" -ForegroundColor Green
+Write-Host "${mdeSectionNumber}.2 ADDITIONAL MDE ONBOARDING VALIDATION" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 
 # DiagTrack Service Check
@@ -2245,7 +2338,7 @@ if ($status.MDE.EventLogErrors.RecentErrorCount -is [int]) {
 Write-Host ""
 
 # Report 3.3: Streamlined Connectivity Prerequisites
-Write-Host "3.3 STREAMLINED CONNECTIVITY PREREQUISITES" -ForegroundColor Green
+Write-Host "${mdeSectionNumber}.3 STREAMLINED CONNECTIVITY PREREQUISITES" -ForegroundColor Green
 Write-Host "   ----------------------------------------" -ForegroundColor Green
 Write-Host "   Reference: https://learn.microsoft.com/en-us/defender-endpoint/configure-device-connectivity#prerequisites" -ForegroundColor DarkGray
 Write-Host ""
@@ -2440,8 +2533,15 @@ Write-Host "     • Engine: Version 1.1.19900.2 or higher" -ForegroundColor Gra
 Write-Host "     • Security Intelligence: Current and up-to-date" -ForegroundColor Gray
 Write-Host ""
 
+# ==================== ADDITIONAL CHECKS ====================
+Write-Host "╔════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║     ADDITIONAL SYSTEM CHECKS           ║" -ForegroundColor Cyan
+Write-Host "╚════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+
 # Report 4: Windows Setup Status
-Write-Host "4. WINDOWS SETUP STATUS" -ForegroundColor Green
+$setupSectionNumber = if ($SkipArc) { "2" } else { "4" }
+Write-Host "${setupSectionNumber}. WINDOWS SETUP STATUS" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 Write-Host "   Setup Status:     $($status.WindowsSetup.Status)" -ForegroundColor $(if ($status.WindowsSetup.Status -eq "Completed") {"Green"} elseif ($status.WindowsSetup.Status -match "In Progress") {"Yellow"} else {"Red"})
 if ($status.WindowsSetup.ImageState -and $status.WindowsSetup.ImageState -ne "Not Found" -and $status.WindowsSetup.ImageState -ne "Path Not Found") {
@@ -2452,8 +2552,17 @@ if ($status.WindowsSetup.ImageState -and $status.WindowsSetup.ImageState -ne "No
 Write-Host "   Registry Path:    HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ForegroundColor DarkGray
 Write-Host ""
 
+# ==================== AZURE ARC EXTENSIONS ====================
+if (-not $SkipArc) {
+    Write-Host "╔════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "║     AZURE ARC EXTENSIONS               ║" -ForegroundColor Cyan
+    Write-Host "╚════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host ""
+}
+
 # Report 4.1: Extension Service Status
-Write-Host "4.1 AZURE ARC EXTENSION SERVICE" -ForegroundColor Green
+if (-not $SkipArc) {
+    Write-Host "${setupSectionNumber}.1 AZURE ARC EXTENSION SERVICE" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 if ($status.ExtensionService.Status -eq "Running") {
     Write-Host "   Extension Service: RUNNING" -ForegroundColor Green
@@ -2469,11 +2578,14 @@ if ($status.ExtensionService.LogExists) {
     Write-Host "   Extension Log:     Available at $($status.ExtensionService.LogPath)" -ForegroundColor Gray
 } else {
     Write-Host "   Extension Log:     Not found (service may not have started)" -ForegroundColor Yellow
+    }
+    Write-Host ""
 }
-Write-Host ""
 
 # Report 5: Extensions
-Write-Host "5. AZURE ARC EXTENSIONS" -ForegroundColor Green
+if (-not $SkipArc) {
+    $extSectionNumber = if ($SkipArc) { "3" } else { "5" }
+    Write-Host "${extSectionNumber}. AZURE ARC EXTENSIONS" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 Write-Host "   NOTE: This section shows TWO types of extension checks:" -ForegroundColor Cyan
 Write-Host "         1. Azure Policy Status - Shows if Azure sent configuration to this server" -ForegroundColor Cyan
@@ -2606,9 +2718,17 @@ if ($status.Extensions.Count -gt 0) {
     Write-Host "   No extensions found" -ForegroundColor Yellow
 }
 Write-Host ""
+}
+
+# ==================== CONNECTIVITY CHECKS ====================
+Write-Host "╔════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║     CONNECTIVITY CHECKS                ║" -ForegroundColor Cyan
+Write-Host "╚════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
 
 # Report 6: Connectivity
-Write-Host "6. CONNECTIVITY CHECK" -ForegroundColor Green
+$connSectionNumber = if ($SkipArc) { "3" } else { "6" }
+Write-Host "${connSectionNumber}. CONNECTIVITY CHECK" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
     # Separate Arc, MDE.Windows, and MDE checks
@@ -2623,7 +2743,7 @@ if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
     Write-Host ""
     
     # Display Azure Arc endpoints
-    if ($arcChecks.Count -gt 0) {
+    if (-not $SkipArc -and $arcChecks.Count -gt 0) {
         $arcPassed = ($arcChecks | Where-Object { $_.Status -eq "Passed" }).Count
         $arcFailed = ($arcChecks | Where-Object { $_.Status -eq "Failed" }).Count
         Write-Host "   Azure Arc Endpoints: $arcPassed Passed, $arcFailed Failed" -ForegroundColor Cyan
@@ -2633,17 +2753,24 @@ if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
             Write-Host "   [$statusIcon] $($check.Status.PadRight(6)) - $($check.URL)" -ForegroundColor $statusColor
         }
         Write-Host ""
-    } else {
+    } elseif (-not $SkipArc) {
         # If no Arc checks were parsed, show raw output
         Write-Host "   Azure Arc Endpoints:" -ForegroundColor Cyan
-        Write-Host "   (Unable to parse azcmagent check output - showing raw results)" -ForegroundColor Yellow
         if ($status.Connectivity) {
+            # Check if output looks like formatted table (successful parse)
+            if ($status.Connectivity -match "Use Case.*Endpoint.*Reachable") {
+                Write-Host "   (Showing azcmagent check results)" -ForegroundColor Cyan
+            } else {
+                Write-Host "   (Unable to parse azcmagent check output - showing raw results)" -ForegroundColor Yellow
+            }
             $status.Connectivity -split "`n" | ForEach-Object {
-                if ($_ -match "✓|Passed|reachable|succeeded") {
+                if ($_ -match "✓|Passed|reachable|succeeded|true") {
                     Write-Host "   $_" -ForegroundColor Green
-                } elseif ($_ -match "✗|Failed|unreachable|error") {
+                } elseif ($_ -match "✗|Failed|unreachable|error|false") {
                     Write-Host "   $_" -ForegroundColor Red
                 } elseif ($_ -match "https?://") {
+                    Write-Host "   $_" -ForegroundColor Gray
+                } else {
                     Write-Host "   $_" -ForegroundColor Gray
                 }
             }
@@ -2652,7 +2779,7 @@ if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
     }
     
     # Display MDE.Windows Extension endpoints (for Arc extension installation)
-    if ($mdeWindowsChecks.Count -gt 0) {
+    if (-not $SkipArc -and $mdeWindowsChecks.Count -gt 0) {
         $mdeWindowsPassed = ($mdeWindowsChecks | Where-Object { $_.Status -eq "Passed" }).Count
         $mdeWindowsFailed = ($mdeWindowsChecks | Where-Object { $_.Status -eq "Failed" }).Count
         Write-Host "   MDE.Windows Extension Endpoints (Arc Extension Installation): $mdeWindowsPassed Passed, $mdeWindowsFailed Failed" -ForegroundColor Cyan
@@ -2675,12 +2802,14 @@ if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
         $mdeOptionalFailed = @($mdeChecks | Where-Object { $_.Status -eq "Failed" -and $_.Mandatory -eq $false }).Count
         $mdeMandatoryTotal = @($mdeChecks | Where-Object { $_.Mandatory -eq $true }).Count
         $mdeOptionalTotal = @($mdeChecks | Where-Object { $_.Mandatory -eq $false }).Count
-        Write-Host "   MDE Agent Runtime Endpoints (Manual & Arc-managed): $mdePassed Passed, $mdeFailed Failed" -ForegroundColor Cyan
+        $mdeTitle = if ($SkipArc) { "MDE Agent Runtime Endpoints" } else { "MDE Agent Runtime Endpoints (Manual & Arc-managed)" }
+        $mdeNote = if ($SkipArc) { "Required for MDE agent operation" } else { "Required for MDE agent operation (both onboarding methods)" }
+        Write-Host "   $mdeTitle`: $mdePassed Passed, $mdeFailed Failed" -ForegroundColor Cyan
         Write-Host "   Endpoint Breakdown: $mdeMandatoryTotal Mandatory, $mdeOptionalTotal Optional" -ForegroundColor DarkGray
         if ($mdeMandatoryFailed -gt 0 -or $mdeOptionalFailed -gt 0) {
             Write-Host "   Failed Breakdown: $mdeMandatoryFailed Mandatory, $mdeOptionalFailed Optional" -ForegroundColor $(if ($mdeMandatoryFailed -gt 0) { "Red" } else { "Yellow" })
         }
-        Write-Host "   Note: Required for MDE agent operation (both onboarding methods)" -ForegroundColor DarkGray
+        Write-Host "   Note: $mdeNote" -ForegroundColor DarkGray
         foreach ($check in $mdeChecks) {
             $statusColor = if ($check.Status -eq "Passed") { "Green" } elseif ($check.Mandatory -eq $false) { "Yellow" } else { "Red" }
             $statusIcon = if ($check.Status -eq "Passed") { "✓" } else { "✗" }
@@ -2713,14 +2842,16 @@ Write-Host ""
 
 $issuesFound = $false
 
-if (-not $status.ArcAgent.Installed) {
+if (-not $SkipArc -and -not $status.ArcAgent.Installed) {
     Write-Host "[CRITICAL] Azure Arc Agent is not installed" -ForegroundColor Red
     Write-Host "           Action: Install the Azure Arc agent" -ForegroundColor Yellow
     $issuesFound = $true
+} elseif ($SkipArc -and $status.ArcAgent.Installed -eq "Skipped") {
+    Write-Host "[INFO] Azure Arc validation was skipped (-SkipArc)" -ForegroundColor Cyan
 }
 
 # Check for certificate thumbprint mismatch
-if ($status.ArcAgent.ErrorDetails -and $status.ArcAgent.ErrorDetails -match "thumbprint.*does not match") {
+if (-not $SkipArc -and $status.ArcAgent.ErrorDetails -and $status.ArcAgent.ErrorDetails -match "thumbprint.*does not match") {
     Write-Host "[CRITICAL] Certificate thumbprint mismatch detected" -ForegroundColor Red
     Write-Host "           Issue: The certificate thumbprint in the certificate file does not match the expected thumbprint" -ForegroundColor Red
     Write-Host "           Root Cause: Certificate files may be corrupted or out of sync" -ForegroundColor Yellow
@@ -2729,43 +2860,72 @@ if ($status.ArcAgent.ErrorDetails -and $status.ArcAgent.ErrorDetails -match "thu
     Write-Host "                   2. azcmagent connect --resource-group <RG> --tenant-id <TENANT> --location <LOCATION> --subscription-id <SUB>" -ForegroundColor Cyan
     Write-Host "           Alternative: Delete certificate files from %ProgramData%\AzureConnectedMachineAgent\Certs and reconnect" -ForegroundColor Yellow
     $issuesFound = $true
-} elseif ($status.ArcAgent.Status -match "Disconnected" -and $status.ArcAgent.Installed) {
+} elseif (-not $SkipArc -and $status.ArcAgent.Status -match "Disconnected" -and $status.ArcAgent.Installed) {
     Write-Host "[CRITICAL] Azure Arc Agent is disconnected" -ForegroundColor Red
-    if ($status.ArcAgent.ErrorCode) {
-        Write-Host "           Error: $($status.ArcAgent.ErrorCode)" -ForegroundColor Red
+    
+    # Check if certificate errors exist
+    $certErrors = @()
+    if ($status.Certificates) {
+        foreach ($cert in $status.Certificates.GetEnumerator()) {
+            if ($cert.Value -match "Error|Exception|Unspecified error") {
+                $certErrors += $cert.Key
+            }
+        }
     }
-    Write-Host "           Action: Disconnect and reconnect the agent" -ForegroundColor Yellow
-    Write-Host "                   azcmagent disconnect" -ForegroundColor Cyan
+    
+    if ($certErrors.Count -gt 0) {
+        Write-Host "           Root Cause: Certificate error detected - $($certErrors -join ', ')" -ForegroundColor Red
+        Write-Host "           Issue: Failed to load managed identity certificate(s)" -ForegroundColor Red
+        Write-Host "           Impact: Arc agent cannot authenticate with Azure" -ForegroundColor Yellow
+    }
+    
+    # Check if Arc endpoints are reachable despite disconnection
+    $arcEndpointsReachable = $false
+    if ($status.ConnectivityChecks) {
+        $arcConnectivityOK = @($status.ConnectivityChecks | Where-Object { $_.Category -eq "Azure Arc" -and $_.Status -eq "Passed" })
+        if ($arcConnectivityOK.Count -gt 0) {
+            $arcEndpointsReachable = $true
+            Write-Host "           Note: Arc endpoints ARE reachable ($($arcConnectivityOK.Count) endpoints working)" -ForegroundColor Yellow
+            Write-Host "                 Disconnection is likely due to certificate/authentication issues, not network" -ForegroundColor Yellow
+        }
+    }
+    
+    if ($status.ArcAgent.ErrorCode) {
+        Write-Host "           Error Code: $($status.ArcAgent.ErrorCode)" -ForegroundColor Red
+    }
+    
+    Write-Host "           Action: Disconnect and reconnect the agent to regenerate certificates" -ForegroundColor Yellow
+    Write-Host "                   azcmagent disconnect --force-local-only" -ForegroundColor Cyan
     Write-Host "                   azcmagent connect --resource-group <RG> --tenant-id <TENANT> --location <LOCATION> --subscription-id <SUB>" -ForegroundColor Cyan
     $issuesFound = $true
-} elseif ($status.ArcAgent.Status -notmatch "Connected" -and $status.ArcAgent.Installed) {
+} elseif (-not $SkipArc -and $status.ArcAgent.Status -notmatch "Connected" -and $status.ArcAgent.Installed) {
     Write-Host "[CRITICAL] Azure Arc Agent is not connected" -ForegroundColor Red
     Write-Host "           Action: Check agent logs and network connectivity" -ForegroundColor Yellow
     $issuesFound = $true
 }
 
 # Check for stale heartbeat
-if ($status.ArcAgent.HoursSinceHeartbeat -and $status.ArcAgent.HoursSinceHeartbeat -gt 24) {
+if (-not $SkipArc -and $status.ArcAgent.HoursSinceHeartbeat -and $status.ArcAgent.HoursSinceHeartbeat -gt 24) {
     Write-Host "[CRITICAL] Agent heartbeat is stale (last: $($status.ArcAgent.HoursSinceHeartbeat) hours ago)" -ForegroundColor Red
     Write-Host "           Issue: Agent has not communicated with Azure in over 24 hours" -ForegroundColor Red
     Write-Host "           Action: Check network connectivity to Azure endpoints" -ForegroundColor Yellow
     Write-Host "                   Run: azcmagent check" -ForegroundColor Cyan
     Write-Host "                   Verify proxy settings and firewall rules" -ForegroundColor Yellow
     $issuesFound = $true
-} elseif ($status.ArcAgent.HoursSinceHeartbeat -and $status.ArcAgent.HoursSinceHeartbeat -gt 2) {
+} elseif (-not $SkipArc -and $status.ArcAgent.HoursSinceHeartbeat -and $status.ArcAgent.HoursSinceHeartbeat -gt 2) {
     Write-Host "[WARNING] Agent heartbeat is delayed (last: $($status.ArcAgent.HoursSinceHeartbeat) hours ago)" -ForegroundColor Yellow
     Write-Host "          Action: Monitor connectivity and check for intermittent network issues" -ForegroundColor Yellow
     $issuesFound = $true
 }
 
 # Check dependent services
-if ($status.ArcAgent.DependentServices.himds -and $status.ArcAgent.DependentServices.himds -ne "running") {
+if (-not $SkipArc -and $status.ArcAgent.DependentServices.himds -and $status.ArcAgent.DependentServices.himds -ne "running") {
     Write-Host "[CRITICAL] HIMDS Service is not running (Status: $($status.ArcAgent.DependentServices.himds))" -ForegroundColor Red
     Write-Host "           Action: Restart the service with: Restart-Service himds" -ForegroundColor Yellow
     $issuesFound = $true
 }
 
-if ($status.ArcAgent.DependentServices.extensionservice -and $status.ArcAgent.DependentServices.extensionservice -ne "running") {
+if (-not $SkipArc -and $status.ArcAgent.DependentServices.extensionservice -and $status.ArcAgent.DependentServices.extensionservice -ne "running") {
     Write-Host "[CRITICAL] Extension Service is not running (Status: $($status.ArcAgent.DependentServices.extensionservice))" -ForegroundColor Red
     Write-Host "           Action: Restart the service with: Restart-Service extensionservice" -ForegroundColor Yellow
     Write-Host "           Note: Extensions will not function until this service is running" -ForegroundColor Yellow
@@ -2776,7 +2936,7 @@ if ($status.ArcAgent.DependentServices.extensionservice -and $status.ArcAgent.De
 if ($status.ConnectivityChecks) {
     # Check Azure Arc connectivity failures
     $failedArcConnectivity = $status.ConnectivityChecks | Where-Object { $_.Status -eq "Failed" -and $_.Category -eq "Azure Arc" }
-    if ($failedArcConnectivity.Count -gt 0) {
+    if (-not $SkipArc -and $failedArcConnectivity.Count -gt 0) {
         Write-Host "[CRITICAL] $($failedArcConnectivity.Count) Azure Arc connectivity check(s) failed" -ForegroundColor Red
         Write-Host "           Failed Azure Arc endpoints:" -ForegroundColor Red
         foreach ($failed in $failedArcConnectivity) {
@@ -2801,7 +2961,8 @@ if ($status.ConnectivityChecks) {
             Write-Host "           - $($failed.URL)$desc" -ForegroundColor Red
         }
         Write-Host "           Issue: Unable to reach critical MDE endpoints - MDE functionality degraded" -ForegroundColor Red
-        Write-Host "           Impact: Extension installation/updates may fail, EDR protection degraded" -ForegroundColor Red
+        $impactMsg = if ($SkipArc) { "EDR protection degraded" } else { "Extension installation/updates may fail, EDR protection degraded" }
+        Write-Host "           Impact: $impactMsg" -ForegroundColor Red
         Write-Host "           Root Cause: Network connectivity or firewall blocking MDE traffic" -ForegroundColor Red
         Write-Host "           Action: Verify firewall allows access to MANDATORY MDE endpoints" -ForegroundColor Yellow
         Write-Host "                   Required MDE URLs (see failed endpoints above for specifics):" -ForegroundColor Yellow
@@ -3141,33 +3302,48 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
 Write-Host ""
 
 # Check for manual MDE onboarding vs Arc-managed extension mismatch
-if ($portalShowsOnboarded) {
+if (-not $SkipArc -and $portalShowsOnboarded) {
     $mdeExtInstalled = $status.Extensions | Where-Object { $_.Name -match "MDE.Windows" -and $_.Installed -eq $true }
     if (-not $mdeExtInstalled) {
         Write-Host "[INFO] MDE Onboarding Method: Manual/Classic (not Arc-managed)" -ForegroundColor Cyan
-        Write-Host "       Azure Arc: Connected ✓" -ForegroundColor Green
+        
+        # Check if Arc agent is actually installed before claiming it's connected
+        $arcStatus = if ($status.ArcAgent.Installed) { "Connected ✓" } else { "NOT INSTALLED ✗" }
+        $arcColor = if ($status.ArcAgent.Installed) { "Green" } else { "Red" }
+        Write-Host "       Azure Arc: $arcStatus" -ForegroundColor $arcColor
+        
         Write-Host "       MDE Agent: Onboarded ✓ (manually, not via Arc extension)" -ForegroundColor Green
         Write-Host "       MDE.Windows Extension: NOT INSTALLED" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "       Portal Status Breakdown:" -ForegroundColor Cyan
-        Write-Host "       ├─ 'Defender for Server': Onboarded ✓" -ForegroundColor Green
-        Write-Host "       ├─ 'Defender for Endpoint': Can be onboarded" -ForegroundColor Yellow
-        Write-Host "       └─ 'Last device update': Shows current date (device IS communicating)" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "       Why 'Can be onboarded' Shows When Device IS Already Onboarded:" -ForegroundColor Yellow
-        Write-Host "         • Portal displays TWO different onboarding statuses:" -ForegroundColor Gray
-        Write-Host "           - 'Defender for Server': Shows manual onboarding status (Onboarded ✓)" -ForegroundColor Gray
-        Write-Host "           - 'Defender for Endpoint': Shows Arc extension status (Can be onboarded)" -ForegroundColor Gray
-        Write-Host "         • 'Can be onboarded' means: MDE.Windows extension can be installed" -ForegroundColor Gray
-        Write-Host "         • 'Last device update' proves device IS working and communicating" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "       Current Configuration:" -ForegroundColor Cyan
-        Write-Host "         ✓ Azure Arc agent: Connected and healthy" -ForegroundColor Green
-        Write-Host "         ✓ MDE agent: Onboarded and communicating (manual method)" -ForegroundColor Green
-        Write-Host "         ℹ MDE.Windows extension: Not installed (optional - alternative method)" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "       Summary: MDE is working correctly - no action required" -ForegroundColor Green
-        Write-Host "                (Arc extension is optional alternative to manual onboarding)" -ForegroundColor Cyan
+        
+        if ($status.ArcAgent.Installed) {
+            Write-Host "       Portal Status Breakdown:" -ForegroundColor Cyan
+            Write-Host "       ├─ 'Defender for Server': Onboarded ✓" -ForegroundColor Green
+            Write-Host "       ├─ 'Defender for Endpoint': Can be onboarded" -ForegroundColor Yellow
+            Write-Host "       └─ 'Last device update': Shows current date (device IS communicating)" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "       Why 'Can be onboarded' Shows When Device IS Already Onboarded:" -ForegroundColor Yellow
+            Write-Host "         • Portal displays TWO different onboarding statuses:" -ForegroundColor Gray
+            Write-Host "           - 'Defender for Server': Shows manual onboarding status (Onboarded ✓)" -ForegroundColor Gray
+            Write-Host "           - 'Defender for Endpoint': Shows Arc extension status (Can be onboarded)" -ForegroundColor Gray
+            Write-Host "         • 'Can be onboarded' means: MDE.Windows extension can be installed" -ForegroundColor Gray
+            Write-Host "         • 'Last device update' proves device IS working and communicating" -ForegroundColor Gray
+            Write-Host ""
+            Write-Host "       Current Configuration:" -ForegroundColor Cyan
+            Write-Host "         ✓ Azure Arc agent: Connected and healthy" -ForegroundColor Green
+            Write-Host "         ✓ MDE agent: Onboarded and communicating (manual method)" -ForegroundColor Green
+            Write-Host "         ℹ MDE.Windows extension: Not installed (optional - alternative method)" -ForegroundColor Gray
+            Write-Host ""
+            Write-Host "       Summary: MDE is working correctly - no action required" -ForegroundColor Green
+            Write-Host "                (Arc extension is optional alternative to manual onboarding)" -ForegroundColor Cyan
+        } else {
+            Write-Host "       Current Configuration:" -ForegroundColor Cyan
+            Write-Host "         ✗ Azure Arc agent: NOT INSTALLED" -ForegroundColor Red
+            Write-Host "         ✓ MDE agent: Onboarded and communicating (manual onboarding method)" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "       Summary: MDE is working correctly using manual onboarding" -ForegroundColor Green
+            Write-Host "                Azure Arc agent is not required for manual MDE onboarding" -ForegroundColor Cyan
+        }
         Write-Host ""
     }
 }
@@ -3255,7 +3431,7 @@ if ($failedExtensions.Count -gt 0) {
 
 # Check MDE connectivity prerequisites when extension is not installed
 $mdeExtCheck = $status.Extensions | Where-Object { $_.Name -match "MDE.Windows" }
-if ($mdeExtCheck -and -not $mdeExtCheck.Installed) {
+if (-not $SkipArc -and $mdeExtCheck -and -not $mdeExtCheck.Installed) {
     # Check if MDE connectivity tests were performed (focus on MDE.Windows category for extension installation)
     $mdeWindowsConnectivityTests = $status.ConnectivityChecks | Where-Object { $_.Category -eq "MDE.Windows" }
     $mdeConnectivityTests = $status.ConnectivityChecks | Where-Object { $_.Category -eq "MDE" -or $_.Category -eq "MDE.Windows" }
@@ -3320,7 +3496,7 @@ if ($status.MDE.OrgId -and $status.MDE.OrgId -ne "Not Available" -and $status.MD
 }
 
 # Check Extension Service Status
-if ($status.ExtensionService.Status -ne "Running") {
+if (-not $SkipArc -and $status.ExtensionService.Status -ne "Running") {
     Write-Host "[CRITICAL] Azure Arc Extension Service is not running" -ForegroundColor Red
     Write-Host "           Service Status: $($status.ExtensionService.Status)" -ForegroundColor Red
     Write-Host "           Impact: Extensions cannot install, update, or report status" -ForegroundColor Red
@@ -3347,7 +3523,7 @@ if ($status.ExtensionService.Status -ne "Running") {
 
 # Check if extensions show 'No status file' but service is running
 $noStatusExtensions = $status.Extensions | Where-Object { $_.Status -match "No status file" }
-if ($noStatusExtensions.Count -gt 0 -and $status.ExtensionService.Status -eq "Running") {
+if (-not $SkipArc -and $noStatusExtensions.Count -gt 0 -and $status.ExtensionService.Status -eq "Running") {
     Write-Host "[INFO] Extensions showing 'No status file' while Extension Service is running" -ForegroundColor Cyan
     Write-Host "       This is NORMAL for newly deployed extensions that haven't completed first run" -ForegroundColor Gray
     Write-Host ""
@@ -3582,9 +3758,14 @@ Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "             LOG LOCATIONS              " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "   Arc Agent:   C:\ProgramData\AzureConnectedMachineAgent\Log\"
+if (-not $SkipArc) {
+    Write-Host "   Arc Agent:   C:\ProgramData\AzureConnectedMachineAgent\Log\"
+}
 Write-Host "   MDE:         Event Viewer > Applications and Services Logs > Microsoft > Windows > SENSE"
-Write-Host "   Extensions:  C:\ProgramData\GuestConfig\extension_logs\"
-Write-Host "   Arc Plugins: C:\Packages\Plugins\Microsoft.Azure.*\"
+if (-not $SkipArc) {
+    Write-Host "   Extensions:  C:\ProgramData\GuestConfig\extension_logs\"
+    Write-Host "   Arc Plugins: C:\Packages\Plugins\Microsoft.Azure.*\"
+}
 Write-Host ""
 Write-Host "=== Check Complete ===" -ForegroundColor Cyan
+
