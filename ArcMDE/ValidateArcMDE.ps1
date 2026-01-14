@@ -61,7 +61,17 @@ param(
         Mandatory=$false,
         HelpMessage="Skip Azure Arc agent validation checks"
     )]
-    [switch]$SkipArc = $false
+    [switch]$SkipArc = $false,
+    
+    [Parameter(
+        Mandatory=$false,
+        HelpMessage="Force direct connectivity testing (bypass proxy) instead of auto-detecting proxy. By default, script will use proxy if detected."
+    )]
+    [switch]$ForceDirectConnection = $false,
+    
+    [Parameter(Mandatory=$false, HelpMessage="Explicit credentials for proxy authentication. Use when running as SYSTEM or service account. Example: Get-Credential")]
+    [System.Management.Automation.PSCredential]
+    $ProxyCredential
 )
 
 # Ensure Region has a valid value (defense against empty strings)
@@ -69,6 +79,606 @@ if ([string]::IsNullOrWhiteSpace($Region)) {
     $Region = "Australia"
     Write-Host "Region parameter was empty, defaulting to: Australia" -ForegroundColor Yellow
     Write-Host ""
+}
+
+# Function to detect execution context
+function Get-ExecutionContext {
+    try {
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $userName = $currentUser.Name
+        $isSystem = $currentUser.IsSystem
+        
+        $context = @{
+            UserName = $userName
+            IsSystem = $isSystem
+            IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            SID = $currentUser.User.Value
+        }
+        
+        # Determine account type
+        if ($isSystem) {
+            $context.AccountType = "SYSTEM"
+            $context.SupportsDefaultCredentials = $false
+            $context.Warning = "Running as SYSTEM - no user credentials available for proxy authentication"
+        } elseif ($userName -match "NT AUTHORITY\\LOCAL SERVICE" -or $userName -match "NT AUTHORITY\\NETWORK SERVICE") {
+            $context.AccountType = "Service Account"
+            $context.SupportsDefaultCredentials = $false
+            $context.Warning = "Running as service account - limited credentials for proxy authentication"
+        } elseif ($userName -match "\\\$") {
+            # Machine account
+            $context.AccountType = "Machine Account"
+            $context.SupportsDefaultCredentials = $false
+            $context.Warning = "Running as machine account - may not have proxy credentials"
+        } else {
+            $context.AccountType = "User Account"
+            $context.SupportsDefaultCredentials = $true
+            $context.Warning = $null
+        }
+        
+        return $context
+    } catch {
+        return @{
+            UserName = "Unknown"
+            IsSystem = $false
+            IsElevated = $false
+            AccountType = "Unknown"
+            SupportsDefaultCredentials = $true
+            Warning = $null
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+# Function to detect proxy configuration
+function Get-ProxyConfiguration {
+    try {
+        $proxyInfo = @{
+            ProxyEnabled = $false
+            ProxyServer = $null
+            ProxyAutoConfigURL = $null
+            ProxyBypass = $null
+            Method = "None"
+            AutoDetect = $false
+            WPADDetected = $false
+            DetectionSource = @()  # Track where settings were found
+        }
+        
+        # Check Machine-level (HKLM) Internet Settings FIRST (takes precedence on servers)
+        $regPathMachine = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings"
+        if (Test-Path $regPathMachine) {
+            $proxyEnable = Get-ItemProperty -Path $regPathMachine -Name ProxyEnable -ErrorAction SilentlyContinue
+            $proxyServer = Get-ItemProperty -Path $regPathMachine -Name ProxyServer -ErrorAction SilentlyContinue
+            $autoConfigURL = Get-ItemProperty -Path $regPathMachine -Name AutoConfigURL -ErrorAction SilentlyContinue
+            $proxyOverride = Get-ItemProperty -Path $regPathMachine -Name ProxyOverride -ErrorAction SilentlyContinue
+            
+            if ($proxyEnable.ProxyEnable -eq 1 -and $proxyServer.ProxyServer) {
+                $proxyInfo.ProxyEnabled = $true
+                $proxyInfo.ProxyServer = $proxyServer.ProxyServer
+                $proxyInfo.Method = "Machine-level Proxy (HKLM)"
+                $proxyInfo.DetectionSource += "HKLM"
+                if ($proxyOverride.ProxyOverride) {
+                    $proxyInfo.ProxyBypass = $proxyOverride.ProxyOverride
+                }
+            }
+            
+            if ($autoConfigURL.AutoConfigURL) {
+                $proxyInfo.ProxyEnabled = $true
+                $proxyInfo.ProxyAutoConfigURL = $autoConfigURL.AutoConfigURL
+                if ($proxyInfo.Method -eq "Machine-level Proxy (HKLM)") {
+                    $proxyInfo.Method = "Machine-level Proxy + PAC (HKLM)"
+                } else {
+                    $proxyInfo.Method = "Machine-level PAC (HKLM)"
+                    $proxyInfo.DetectionSource += "HKLM"
+                }
+            }
+        }
+        
+        # Check Group Policy proxy settings
+        $regPathGP = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings"
+        if (Test-Path $regPathGP) {
+            $proxyEnableGP = Get-ItemProperty -Path $regPathGP -Name ProxyEnable -ErrorAction SilentlyContinue
+            $proxyServerGP = Get-ItemProperty -Path $regPathGP -Name ProxyServer -ErrorAction SilentlyContinue
+            $autoConfigURLGP = Get-ItemProperty -Path $regPathGP -Name AutoConfigURL -ErrorAction SilentlyContinue
+            
+            if ($proxyEnableGP.ProxyEnable -eq 1 -and $proxyServerGP.ProxyServer) {
+                $proxyInfo.ProxyEnabled = $true
+                $proxyInfo.ProxyServer = $proxyServerGP.ProxyServer
+                $proxyInfo.Method = "Group Policy Proxy"
+                $proxyInfo.DetectionSource += "Group Policy"
+            }
+            
+            if ($autoConfigURLGP.AutoConfigURL) {
+                $proxyInfo.ProxyEnabled = $true
+                $proxyInfo.ProxyAutoConfigURL = $autoConfigURLGP.AutoConfigURL
+                if ($proxyInfo.Method -match "Group Policy") {
+                    $proxyInfo.Method = "Group Policy Proxy + PAC"
+                } else {
+                    $proxyInfo.Method = "Group Policy PAC"
+                    $proxyInfo.DetectionSource += "Group Policy"
+                }
+            }
+        }
+        
+        # Check User-level (HKCU) Internet Settings (lower priority)
+        $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        if (Test-Path $regPath) {
+            $proxyEnable = Get-ItemProperty -Path $regPath -Name ProxyEnable -ErrorAction SilentlyContinue
+            $proxyServer = Get-ItemProperty -Path $regPath -Name ProxyServer -ErrorAction SilentlyContinue
+            $autoConfigURL = Get-ItemProperty -Path $regPath -Name AutoConfigURL -ErrorAction SilentlyContinue
+            $proxyOverride = Get-ItemProperty -Path $regPath -Name ProxyOverride -ErrorAction SilentlyContinue
+            $autoDetect = Get-ItemProperty -Path $regPath -Name AutoDetect -ErrorAction SilentlyContinue
+            
+            # Check for WPAD (Automatically detect settings) - User level
+            if ($autoDetect.AutoDetect -eq 1) {
+                $proxyInfo.ProxyEnabled = $true
+                $proxyInfo.AutoDetect = $true
+                $proxyInfo.WPADDetected = $true
+                if ($proxyInfo.Method -eq "None") {
+                    $proxyInfo.Method = "WPAD (Automatic Discovery - User)"
+                    $proxyInfo.DetectionSource += "HKCU-WPAD"
+                }
+            }
+            
+            # Only use HKCU proxy if not already set by HKLM/GP
+            if ($proxyEnable.ProxyEnable -eq 1 -and $proxyServer.ProxyServer -and $proxyInfo.Method -notmatch "Machine-level|Group Policy") {
+                $proxyInfo.ProxyEnabled = $true
+                $proxyInfo.ProxyServer = $proxyServer.ProxyServer
+                if ($proxyInfo.Method -match "WPAD") {
+                    $proxyInfo.Method = "WPAD + Manual Proxy (User)"
+                } else {
+                    $proxyInfo.Method = "User-level Proxy (HKCU)"
+                    $proxyInfo.DetectionSource += "HKCU"
+                }
+                if ($proxyOverride.ProxyOverride -and -not $proxyInfo.ProxyBypass) {
+                    $proxyInfo.ProxyBypass = $proxyOverride.ProxyOverride
+                }
+            }
+            
+            if ($autoConfigURL.AutoConfigURL -and $proxyInfo.Method -notmatch "Machine-level|Group Policy") {
+                $proxyInfo.ProxyEnabled = $true
+                $proxyInfo.ProxyAutoConfigURL = $autoConfigURL.AutoConfigURL
+                if ($proxyInfo.Method -match "WPAD") {
+                    $proxyInfo.Method = "WPAD + PAC (User)"
+                } elseif ($proxyInfo.Method -match "Manual Proxy") {
+                    $proxyInfo.Method = "User Proxy + PAC (HKCU)"
+                } else {
+                    $proxyInfo.Method = "User-level PAC (HKCU)"
+                    $proxyInfo.DetectionSource += "HKCU"
+                }
+            }
+        }
+        
+        # Check WinHTTP proxy settings (system-wide)
+        try {
+            $winHttpProxy = netsh winhttp show proxy 2>$null
+            if ($winHttpProxy -match "Direct access \(no proxy server\)") {
+                # WinHTTP is set to direct - don't override user settings detection
+            } elseif ($winHttpProxy -match "Proxy Server\(s\)\s*:\s*(.+)") {
+                if (-not $proxyInfo.ProxyEnabled) {
+                    $proxyInfo.ProxyEnabled = $true
+                    $proxyInfo.ProxyServer = $matches[1].Trim()
+                    $proxyInfo.Method = "WinHTTP System Proxy"
+                    $proxyInfo.DetectionSource += "WinHTTP"
+                }
+            } elseif ($winHttpProxy -match "AutoConfigURL\s*:\s*(.+)") {
+                if (-not $proxyInfo.ProxyEnabled) {
+                    $proxyInfo.ProxyEnabled = $true
+                    $proxyInfo.ProxyAutoConfigURL = $matches[1].Trim()
+                    $proxyInfo.Method = "WinHTTP PAC"
+                    $proxyInfo.DetectionSource += "WinHTTP"
+                }
+            }
+            if ($winHttpProxy -match "Bypass List\s*:\s*(.+)") {
+                if (-not $proxyInfo.ProxyBypass) {
+                    $proxyInfo.ProxyBypass = $matches[1].Trim()
+                }
+            }
+        } catch { }
+        
+        # Additional WPAD detection - check Connections registry key
+        try {
+            $connectionsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections"
+            if (Test-Path $connectionsPath) {
+                $defaultConnection = Get-ItemProperty -Path $connectionsPath -Name "DefaultConnectionSettings" -ErrorAction SilentlyContinue
+                if ($defaultConnection.DefaultConnectionSettings) {
+                    # Byte 8 (index 8) contains proxy configuration flags
+                    # 0x01 = Manual proxy, 0x02 = PAC, 0x04 = Auto-detect (WPAD), 0x08 = Direct
+                    $flags = $defaultConnection.DefaultConnectionSettings[8]
+                    if ($flags -band 0x04) {
+                        $proxyInfo.AutoDetect = $true
+                        $proxyInfo.WPADDetected = $true
+                        if (-not $proxyInfo.ProxyEnabled -or $proxyInfo.Method -eq "None") {
+                            $proxyInfo.ProxyEnabled = $true
+                            $proxyInfo.Method = "WPAD (Automatic Discovery)"
+                        }
+                    }
+                }
+            }
+        } catch { }
+        
+        return $proxyInfo
+    } catch {
+        return @{
+            ProxyEnabled = $false
+            ProxyServer = $null
+            ProxyAutoConfigURL = $null
+            ProxyBypass = $null
+            Method = "Detection Failed"
+            AutoDetect = $false
+            WPADDetected = $false
+            DetectionSource = @()
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+# Function to detect Private Link configuration
+function Get-PrivateLinkConfiguration {
+    try {
+        $privateLinkInfo = @{
+            ArcPrivateLinkDetected = $false
+            PrivateEndpoints = @()
+            PrivateIPs = @()
+        }
+        
+        # Check for Arc Private Link endpoints by resolving DNS
+        $arcEndpoints = @(
+            "ae.his.arc.azure.com",
+            "gbl.his.arc.azure.com",
+            "agentserviceapi.guestconfiguration.azure.com"
+        )
+        
+        foreach ($endpoint in $arcEndpoints) {
+            try {
+                $dnsResult = Resolve-DnsName $endpoint -ErrorAction SilentlyContinue
+                if ($dnsResult) {
+                    foreach ($record in $dnsResult) {
+                        if ($record.IPAddress) {
+                            # Check if IP is in private range (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+                            $ip = $record.IPAddress
+                            if ($ip -match "^10\." -or $ip -match "^172\.(1[6-9]|2[0-9]|3[0-1])\." -or $ip -match "^192\.168\." -or $ip -match "^100\." -or $ip -match "^fd") {
+                                $privateLinkInfo.ArcPrivateLinkDetected = $true
+                                $privateLinkInfo.PrivateEndpoints += $endpoint
+                                $privateLinkInfo.PrivateIPs += $ip
+                            }
+                        }
+                    }
+                }
+            } catch { }
+        }
+        
+        return $privateLinkInfo
+    } catch {
+        return @{
+            ArcPrivateLinkDetected = $false
+            PrivateEndpoints = @()
+            PrivateIPs = @()
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+# Function to detect execution context
+function Get-ExecutionContext {
+    try {
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $userName = $currentUser.Name
+        $isSystem = $currentUser.IsSystem
+        
+        $context = @{
+            UserName = $userName
+            IsSystem = $isSystem
+            IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            SID = $currentUser.User.Value
+        }
+        
+        # Determine account type
+        if ($isSystem) {
+            $context.AccountType = "SYSTEM"
+            $context.SupportsDefaultCredentials = $false
+            $context.Warning = "Running as SYSTEM - no user credentials available for proxy authentication"
+        } elseif ($userName -match "NT AUTHORITY\\LOCAL SERVICE" -or $userName -match "NT AUTHORITY\\NETWORK SERVICE") {
+            $context.AccountType = "Service Account"
+            $context.SupportsDefaultCredentials = $false
+            $context.Warning = "Running as service account - limited credentials for proxy authentication"
+        } elseif ($userName -match "\\$") {
+            # Machine account
+            $context.AccountType = "Machine Account"
+            $context.SupportsDefaultCredentials = $false
+            $context.Warning = "Running as machine account - may not have proxy credentials"
+        } else {
+            $context.AccountType = "User Account"
+            $context.SupportsDefaultCredentials = $true
+            $context.Warning = $null
+        }
+        
+        return $context
+    } catch {
+        return @{
+            UserName = "Unknown"
+            IsSystem = $false
+            IsElevated = $false
+            AccountType = "Unknown"
+            SupportsDefaultCredentials = $true
+            Warning = $null
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+# Function to test if proxy requires authentication
+function Test-ProxyAuthentication {
+    param(
+        [Parameter(Mandatory=$false)]
+        [string]$TestUrl = "https://www.microsoft.com",
+        
+        [Parameter(Mandatory=$false)]
+        [System.Management.Automation.PSCredential]$Credential = $null
+    )
+    
+    try {
+        # Test 1: Try without credentials
+        try {
+            $response = Invoke-WebRequest -Uri $TestUrl -Method Head -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+            return @{
+                RequiresAuth = $false
+                AuthType = "None"
+                TestPassed = $true
+                Message = "Proxy accessible without authentication"
+            }
+        } catch {
+            $error1 = $_
+            
+            # Check if error is 407 (Proxy Authentication Required)
+            if ($error1.Exception.Response.StatusCode.value__ -eq 407) {
+                # Test 2: Try with credentials (explicit or default)
+                try {
+                    if ($Credential) {
+                        # Use provided credentials
+                        $response = Invoke-WebRequest -Uri $TestUrl -Method Head -TimeoutSec 5 -UseBasicParsing -Credential $Credential -ErrorAction Stop
+                        return @{
+                            RequiresAuth = $true
+                            AuthType = "Explicit Credentials (Working)"
+                            TestPassed = $true
+                            Message = "Proxy requires authentication - Provided credentials working"
+                        }
+                    } else {
+                        # Use default credentials
+                        $response = Invoke-WebRequest -Uri $TestUrl -Method Head -TimeoutSec 5 -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                        return @{
+                            RequiresAuth = $true
+                            AuthType = "Windows/NTLM (Working)"
+                            TestPassed = $true
+                            Message = "Proxy requires authentication - Windows credentials working"
+                        }
+                    }
+                } catch {
+                    return @{
+                        RequiresAuth = $true
+                        AuthType = if ($Credential) { "Explicit Credentials (Failed)" } else { "Windows/NTLM (Failed)" }
+                        TestPassed = $false
+                        Message = "Proxy requires authentication but credentials failed"
+                        Error = $_.Exception.Message
+                    }
+                }
+            } else {
+                # Different error (timeout, DNS, etc.)
+                return @{
+                    RequiresAuth = "Unknown"
+                    AuthType = "N/A"
+                    TestPassed = $false
+                    Message = "Connectivity test failed (not auth-related)"
+                    Error = $error1.Exception.Message
+                }
+            }
+        }
+    } catch {
+        return @{
+            RequiresAuth = "Unknown"
+            AuthType = "N/A"
+            TestPassed = $false
+            Message = "Test failed"
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+# Function to get actual proxy that will be used for a URL
+function Get-ActualProxyForUrl {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Url
+    )
+    
+    try {
+        $uri = [System.Uri]$Url
+        $request = [System.Net.WebRequest]::Create($uri)
+        
+        # Get the proxy that will be used
+        if ($request.Proxy -ne $null) {
+            $proxyUri = $request.Proxy.GetProxy($uri)
+            
+            # If proxy URI equals the original URI, it means direct connection
+            if ($proxyUri.AbsoluteUri -eq $uri.AbsoluteUri) {
+                return @{
+                    UsesProxy = $false
+                    ProxyAddress = "Direct"
+                    RoutingMethod = "Direct Connection"
+                }
+            } else {
+                return @{
+                    UsesProxy = $true
+                    ProxyAddress = $proxyUri.AbsoluteUri
+                    ProxyHost = $proxyUri.Host
+                    ProxyPort = $proxyUri.Port
+                    RoutingMethod = "Via Proxy"
+                }
+            }
+        } else {
+            return @{
+                UsesProxy = $false
+                ProxyAddress = "Direct"
+                RoutingMethod = "Direct Connection (No Proxy Configured)"
+            }
+        }
+    } catch {
+        return @{
+            UsesProxy = $false
+            ProxyAddress = "Unknown"
+            RoutingMethod = "Unable to determine"
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+# Function to test connectivity with proxy support and automatic fallback
+function Test-ConnectivityWithProxy {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Url,
+        
+        [Parameter(Mandatory=$false)]
+        [bool]$UseProxyMethod = $false,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 10,
+        
+        [Parameter(Mandatory=$false)]
+        [bool]$TryProxyFirst = $true,
+        
+        [Parameter(Mandatory=$false)]
+        [System.Management.Automation.PSCredential]$ProxyCredential = $null
+    )
+    
+    $uri = [System.Uri]$Url
+    
+    # If proxy method requested and TryProxyFirst is enabled, try proxy first
+    if ($UseProxyMethod -and $TryProxyFirst) {
+        # Store original proxy settings
+        $originalProxy = [System.Net.WebRequest]::DefaultWebProxy
+        $proxyError = $null
+        $proxyErrorDetails = ""
+        
+        try {
+            # Attempt 1: Use Invoke-WebRequest with system proxy (WPAD, PAC, manual)
+            # Try GET first (more compatible than HEAD), fallback to HEAD if needed
+            # Use credentials (explicit or default) for proxy authentication
+            try {
+                if ($ProxyCredential) {
+                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -Credential $ProxyCredential -ErrorAction Stop
+                } else {
+                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                }
+            } catch {
+                # Some servers reject GET, try HEAD
+                if ($ProxyCredential) {
+                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -Credential $ProxyCredential -ErrorAction Stop
+                } else {
+                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                }
+            }
+            return @{ Success = $true; Method = "Web Request (Proxy-aware)"; StatusCode = $response.StatusCode; TriedFallback = $false }
+        } catch {
+            $proxyError = $_.Exception.Message
+            # Extract more details from exception
+            if ($_.Exception.InnerException) {
+                $proxyErrorDetails = $_.Exception.InnerException.Message
+            }
+            if ($_.Exception.Response) {
+                $proxyErrorDetails += " [HTTP $($_.Exception.Response.StatusCode.value__)]"  
+            }
+            
+            # Attempt 2: Proxy failed, try Invoke-WebRequest with NO PROXY (direct connection)
+            try {
+                # Temporarily disable proxy for this request
+                $noProxy = New-Object System.Net.WebProxy
+                [System.Net.WebRequest]::DefaultWebProxy = $noProxy
+                
+                # Try GET first, fallback to HEAD
+                try {
+                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+                } catch {
+                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+                }
+                
+                # Restore original proxy
+                [System.Net.WebRequest]::DefaultWebProxy = $originalProxy
+                
+                return @{ 
+                    Success = $true
+                    Method = "Web Request (Direct - Fallback from Proxy)"
+                    StatusCode = $response.StatusCode
+                    TriedFallback = $true
+                    ProxyError = if ($proxyErrorDetails) { $proxyErrorDetails } else { $proxyError }
+                }
+            } catch {
+                # Restore original proxy
+                [System.Net.WebRequest]::DefaultWebProxy = $originalProxy
+                
+                $directError = $_.Exception.Message
+                if ($_.Exception.InnerException) {
+                    $directError = $_.Exception.InnerException.Message
+                }
+                
+                return @{ 
+                    Success = $false
+                    Method = "Web Request (Both Proxy and Direct Failed)"
+                    StatusCode = 0
+                    TriedFallback = $true
+                    Error = "Proxy: $($proxyError.Substring(0, [Math]::Min(100, $proxyError.Length))) | Direct: $($directError.Substring(0, [Math]::Min(100, $directError.Length)))"
+                    ProxyErrorFull = if ($proxyErrorDetails) { $proxyErrorDetails } else { $proxyError }
+                    DirectErrorFull = $directError
+                }
+            }
+        }
+    } elseif ($UseProxyMethod) {
+        # Proxy method requested but no fallback
+        try {
+            # Try GET first, fallback to HEAD
+            # Use default credentials for proxy authentication
+            try {
+                $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+            } catch {
+                $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+            }
+            return @{ Success = $true; Method = "Web Request (Proxy-aware)"; StatusCode = $response.StatusCode; TriedFallback = $false }
+        } catch {
+            $errorMsg = $_.Exception.Message
+            if ($_.Exception.InnerException) {
+                $errorMsg = $_.Exception.InnerException.Message
+            }
+            return @{ Success = $false; Method = "Web Request (Proxy-aware)"; StatusCode = 0; TriedFallback = $false; Error = $errorMsg }
+        }
+    } else {
+        # Direct connection only (bypass proxy completely)
+        $originalProxy = [System.Net.WebRequest]::DefaultWebProxy
+        try {
+            # Disable proxy for direct connection
+            $noProxy = New-Object System.Net.WebProxy
+            [System.Net.WebRequest]::DefaultWebProxy = $noProxy
+            
+            # Try GET first, fallback to HEAD
+            try {
+                $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+            } catch {
+                $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+            }
+            
+            # Restore original proxy
+            [System.Net.WebRequest]::DefaultWebProxy = $originalProxy
+            
+            return @{ Success = $true; Method = "Web Request (Direct)"; StatusCode = $response.StatusCode; TriedFallback = $false }
+        } catch {
+            # Restore original proxy
+            [System.Net.WebRequest]::DefaultWebProxy = $originalProxy
+            
+            $errorMsg = $_.Exception.Message
+            if ($_.Exception.InnerException) {
+                $errorMsg = $_.Exception.InnerException.Message
+            }
+            return @{ Success = $false; Method = "Web Request (Direct)"; StatusCode = 0; TriedFallback = $false; Error = $errorMsg }
+        }
+    }
 }
 
 # Function to convert Windows FILETIME to readable DateTime
@@ -91,13 +701,178 @@ function Convert-FileTimeToDateTime {
     }
 }
 
+# Detect proxy configuration
+$proxyConfig = Get-ProxyConfiguration
+
+# Detect Private Link configuration
+$privateLinkConfig = Get-PrivateLinkConfiguration
+
+# Detect execution context (User/SYSTEM/Service Account)
+$scriptExecutionContext = Get-ExecutionContext
+
+# Auto-determine if we should use proxy-aware testing
+$UseProxy = $false
+if ($ForceDirectConnection) {
+    $UseProxy = $false
+    $connectivityApproach = "Direct Connection (Forced)"
+} elseif ($proxyConfig.ProxyEnabled) {
+    $UseProxy = $true
+    $connectivityApproach = "Proxy-First with Direct Fallback (Auto-detected)"
+} else {
+    $UseProxy = $false
+    $connectivityApproach = "Direct Connection (No Proxy Detected)"
+}
+
 Write-Host "=== Azure Arc-Enabled Server Status Check ===" -ForegroundColor Cyan
 Write-Host "Server: $($env:COMPUTERNAME)" -ForegroundColor Yellow
 Write-Host "Current Date: $(Get-Date)" -ForegroundColor Yellow
 Write-Host "Region: $Region" -ForegroundColor Yellow
+Write-Host "Execution Context: $($scriptExecutionContext.AccountType) ($($scriptExecutionContext.UserName))" -ForegroundColor $(if ($scriptExecutionContext.AccountType -eq "User Account") { "Green" } else { "Yellow" })
 if ($SkipArc) {
     Write-Host "Arc Validation: SKIPPED" -ForegroundColor Yellow
 }
+
+Write-Host ""
+Write-Host "╔═══════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║     PROXY DETECTION & CONNECTIVITY APPROACH       ║" -ForegroundColor Cyan
+Write-Host "╚═══════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+
+if ($proxyConfig.ProxyEnabled) {
+    Write-Host "Proxy Status: DETECTED" -ForegroundColor Green
+    Write-Host "  Detection Method: $($proxyConfig.Method)" -ForegroundColor Gray
+    if ($proxyConfig.DetectionSource -and $proxyConfig.DetectionSource.Count -gt 0) {
+        Write-Host "  Detection Source: $($proxyConfig.DetectionSource -join ', ')" -ForegroundColor Gray
+    }
+    
+    # Test proxy authentication
+    Write-Host ""
+    Write-Host "  Testing proxy authentication..." -ForegroundColor Gray
+    
+    # Check if running as SYSTEM/Service Account and warn
+    if (-not $scriptExecutionContext.SupportsDefaultCredentials) {
+        Write-Host "  ⚠️  WARNING: Running as $($scriptExecutionContext.AccountType)" -ForegroundColor Yellow
+        Write-Host "     $($scriptExecutionContext.Warning)" -ForegroundColor Yellow
+        if ($ProxyCredential) {
+            Write-Host "     ✅ Explicit credentials provided via -ProxyCredential" -ForegroundColor Green
+            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com" -Credential $ProxyCredential
+        } else {
+            Write-Host "     💡 Use -ProxyCredential parameter to provide explicit credentials" -ForegroundColor Cyan
+            Write-Host "        Example: -ProxyCredential (Get-Credential)" -ForegroundColor Gray
+            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com"
+        }
+    } else {
+        # Running as user account - use provided credentials or default
+        if ($ProxyCredential) {
+            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com" -Credential $ProxyCredential
+        } else {
+            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com"
+        }
+    }
+    
+    if ($proxyAuthTest.TestPassed) {
+        Write-Host "  Proxy Authentication: " -NoNewline -ForegroundColor Gray
+        Write-Host "$($proxyAuthTest.AuthType)" -ForegroundColor Green
+        if ($proxyAuthTest.RequiresAuth) {
+            if ($ProxyCredential) {
+                Write-Host "    └─ Using provided credentials for proxy" -ForegroundColor Cyan
+            } else {
+                Write-Host "    └─ Using Windows credentials (current user context)" -ForegroundColor Cyan
+            }
+        } else {
+            Write-Host "    └─ No authentication required" -ForegroundColor Cyan
+        }
+    } else {
+        Write-Host "  Proxy Authentication: " -NoNewline -ForegroundColor Gray
+        Write-Host "FAILED" -ForegroundColor Red
+        Write-Host "    └─ $($proxyAuthTest.Message)" -ForegroundColor Yellow
+        if ($proxyAuthTest.Error) {
+            Write-Host "    └─ Error: $($proxyAuthTest.Error)" -ForegroundColor DarkGray
+        }
+        if (-not $scriptExecutionContext.SupportsDefaultCredentials -and -not $ProxyCredential) {
+            Write-Host "    └─ Consider using -ProxyCredential parameter" -ForegroundColor Yellow
+        }
+    }
+    
+    if ($proxyConfig.WPADDetected) {
+        Write-Host ""
+        Write-Host "  WPAD (Web Proxy Auto-Discovery): ENABLED" -ForegroundColor Cyan
+        Write-Host "    ├─ Automatically detect settings: YES" -ForegroundColor Gray
+        Write-Host "    ├─ Discovery Method: DNS/DHCP query for wpad.dat" -ForegroundColor Gray
+        Write-Host "    └─ Proxy will be resolved automatically at runtime" -ForegroundColor Gray
+    }
+    
+    if ($proxyConfig.ProxyServer) {
+        Write-Host "  Manual Proxy Server: $($proxyConfig.ProxyServer)" -ForegroundColor Gray
+    }
+    
+    if ($proxyConfig.ProxyAutoConfigURL) {
+        Write-Host "  PAC File URL: $($proxyConfig.ProxyAutoConfigURL)" -ForegroundColor Gray
+    }
+    
+    if ($proxyConfig.ProxyBypass) {
+        Write-Host "  Bypass List: $($proxyConfig.ProxyBypass)" -ForegroundColor Gray
+    }
+    
+    Write-Host ""
+    Write-Host "Connectivity Strategy: $connectivityApproach" -ForegroundColor Yellow
+    Write-Host "  1. Try proxy-aware connection first (Invoke-WebRequest)" -ForegroundColor Gray
+    Write-Host "     └─ Will use detected proxy (WPAD/PAC/Manual)" -ForegroundColor Gray
+    if ($ProxyCredential) {
+        Write-Host "     └─ Credentials: Using provided credentials (-ProxyCredential)" -ForegroundColor Cyan
+    } else {
+        Write-Host "     └─ Credentials: Using Windows Authentication (UseDefaultCredentials)" -ForegroundColor Cyan
+        if (-not $scriptExecutionContext.SupportsDefaultCredentials) {
+            Write-Host "        ⚠️  Running as $($scriptExecutionContext.AccountType) - may need -ProxyCredential" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "  2. If proxy fails, automatically fallback to direct connection" -ForegroundColor Gray
+    Write-Host "     └─ Uses Invoke-WebRequest with proxy disabled" -ForegroundColor Gray
+    
+    if ($ForceDirectConnection) {
+        Write-Host ""
+        Write-Host "  NOTE: -ForceDirectConnection specified, bypassing proxy" -ForegroundColor Red
+    }
+} else {
+    Write-Host "Proxy Status: NOT DETECTED" -ForegroundColor Yellow
+    Write-Host "  WPAD: Not enabled" -ForegroundColor Gray
+    Write-Host "  Manual Proxy: Not configured" -ForegroundColor Gray
+    Write-Host "  PAC File: Not configured" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Connectivity Strategy: $connectivityApproach" -ForegroundColor Yellow
+    Write-Host "  └─ Using Invoke-WebRequest with direct connection (no proxy)" -ForegroundColor Gray
+    Write-Host "  └─ Credentials: Using Windows Authentication if needed" -ForegroundColor Cyan
+}
+
+# Check for Private Link configuration
+Write-Host ""
+if ($privateLinkConfig.ArcPrivateLinkDetected) {
+    Write-Host "╔═══════════════════════════════════════════════════╗" -ForegroundColor Yellow
+    Write-Host "║     ⚠️  PRIVATE LINK DETECTED                     ║" -ForegroundColor Yellow
+    Write-Host "╚═══════════════════════════════════════════════════╝" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Azure Arc Private Link: ENABLED" -ForegroundColor Yellow
+    Write-Host "  Private Endpoints Found: $($privateLinkConfig.PrivateEndpoints.Count)" -ForegroundColor Gray
+    foreach ($i in 0..($privateLinkConfig.PrivateEndpoints.Count - 1)) {
+        if ($i -lt $privateLinkConfig.PrivateIPs.Count) {
+            Write-Host "    • $($privateLinkConfig.PrivateEndpoints[$i]) → $($privateLinkConfig.PrivateIPs[$i])" -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
+    Write-Host "⚠️  IMPORTANT: MDE Connectivity Impact" -ForegroundColor Yellow
+    Write-Host "  ────────────────────────────────────────────" -ForegroundColor Gray
+    Write-Host "  • Azure Arc uses Private Link (working via private IPs)" -ForegroundColor Cyan
+    Write-Host "  • MDE tests use PUBLIC endpoints" -ForegroundColor Red
+    Write-Host "  • If firewall blocks public internet, MDE tests will FAIL" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Solutions:" -ForegroundColor Yellow
+    Write-Host "    1. Configure MDE to use Private Link endpoints" -ForegroundColor Green
+    Write-Host "       https://learn.microsoft.com/en-us/defender-endpoint/configure-private-link" -ForegroundColor Gray
+    Write-Host "    2. Add firewall rules for MDE public endpoints" -ForegroundColor Green
+    Write-Host "       (See connectivity check results below)" -ForegroundColor Gray
+    Write-Host ""
+}
+
 Write-Host ""
 Write-Host "Collecting status information..." -ForegroundColor Cyan
 Write-Host ""
@@ -111,6 +886,7 @@ $status = @{
     MDE = @{}
     Extensions = @()
     Connectivity = ""
+    PrivateLink = $privateLinkConfig
 }
 
 $azcmagentPath = "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe"
@@ -651,10 +1427,10 @@ if ($osCaption -match "Windows 11") {
     $osSupported = $true
     $osSupportMessage = "Windows Server 2019 (Supported)"
 } elseif ($osCaption -match "Server 2016" -or $osCaption -match "Server 2012 R2") {
-    # NOT supported for streamlined with KB updates - requires unified agent
+    # NOT supported for streamlined connectivity - no KB updates available
     $osSupported = $false
-    $osSupportMessage = "Windows Server 2016/2012 R2 (NOT SUPPORTED - KB updates unavailable)"
-    $status.MDE.StreamlinedConnectivity.Issues += "Server 2016/2012 R2 do not support streamlined connectivity with KB updates - requires modern unified solution agent"
+    $osSupportMessage = "Windows Server 2016/2012 R2 (NOT SUPPORTED for streamlined connectivity)"
+    $status.MDE.StreamlinedConnectivity.Issues += "Server 2016/2012 R2 do not support streamlined connectivity - requires Windows Server 2019+ or modern unified solution package"
 } else {
     $osSupportMessage = "OS not supported for streamlined connectivity"
     $status.MDE.StreamlinedConnectivity.Issues += "OS version not supported - requires Windows 10 1809+, Windows 11, or Windows Server 2019+"
@@ -699,13 +1475,13 @@ if ($osCaption -match "Windows") {
     } elseif ($osCaption -match "Server 2019") {
         $requiredKB = "KB5011503"  # March 8, 2022 (same as Windows 10 1809)
     } elseif ($osCaption -match "Server 2016" -or $osCaption -match "Server 2012 R2") {
-        $requiredKB = "Not available"
-        $kbUpdateMessage = "NOT SUPPORTED - No KB update available (requires modern unified solution package)"
+        $requiredKB = "N/A"
+        $kbUpdateMessage = "KB NOT REQUIRED - Streamlined connectivity not supported on Server 2016/2012 R2 (requires Server 2019+)"
         $kbUpdateSupported = $false
     }
     
     # Check if required KB is installed (if applicable)
-    if ($requiredKB -and $requiredKB -notmatch "End of service|Unified Agent") {
+    if ($requiredKB -and $requiredKB -notmatch "End of service|Unified Agent|Not available|N/A") {
         try {
             # Check installed hotfixes
             $installedKB = Get-HotFix | Where-Object { $_.HotFixID -match $requiredKB.Replace("KB", "") }
@@ -938,9 +1714,10 @@ if ($status.MDE.OnboardingState -eq "Onboarded") {
         }
         
         $streamlinedDomain = $streamlinedEndpoints[$Region]
-        $streamlinedTest = Test-NetConnection -ComputerName $streamlinedDomain -Port 443 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        $streamlinedTestUrl = "https://$streamlinedDomain"
+        $streamlinedTestResult = Test-ConnectivityWithProxy -Url $streamlinedTestUrl -UseProxyMethod $UseProxy -TimeoutSeconds 10 -ProxyCredential $ProxyCredential
         
-        if ($streamlinedTest.TcpTestSucceeded) {
+        if ($streamlinedTestResult.Success) {
             $status.MDE.StreamlinedConnectivity.CurrentlyUsing.StreamlinedDomain = "Reachable"
             $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Evidence += "Streamlined domain ($streamlinedDomain) is reachable for $Region region"
         } else {
@@ -1638,13 +2415,20 @@ $mdeEndpoints += @(
     
 foreach ($endpoint in $mdeEndpoints) {
         try {
-            $testResult = Test-NetConnection -ComputerName $endpoint.URL -Port $endpoint.Port -WarningAction SilentlyContinue -ErrorAction SilentlyContinue -InformationLevel Quiet
+            $testUrl = "https://$($endpoint.URL):$($endpoint.Port)"
+            if ($endpoint.Port -eq 80) {
+                $testUrl = "http://$($endpoint.URL):$($endpoint.Port)"
+            }
+            
+            $testResult = Test-ConnectivityWithProxy -Url $testUrl -UseProxyMethod $UseProxy -TimeoutSeconds 10 -ProxyCredential $ProxyCredential
+            
             $status.ConnectivityChecks += @{
-                URL = "https://$($endpoint.URL):$($endpoint.Port)"
-                Status = if ($testResult) { "Passed" } else { "Failed" }
+                URL = $testUrl
+                Status = if ($testResult.Success) { "Passed" } else { "Failed" }
                 Category = $endpoint.Category
                 Description = $endpoint.Description
                 Mandatory = $endpoint.Mandatory
+                TestMethod = $testResult.Method
             }
         } catch {
             $status.ConnectivityChecks += @{
@@ -1653,6 +2437,8 @@ foreach ($endpoint in $mdeEndpoints) {
                 Category = $endpoint.Category
                 Description = $endpoint.Description
                 Mandatory = $endpoint.Mandatory
+                TestMethod = if ($UseProxy) { "Web Request (Proxy-aware)" } else { "Direct TCP" }
+                Error = $_.Exception.Message
             }
         }
     }
@@ -2834,6 +3620,229 @@ if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
 }
 Write-Host ""
 
+# Comprehensive Proxy Routing Analysis
+try {
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "   COMPREHENSIVE PROXY ROUTING ANALYSIS" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Analyzing routing configuration for ALL tested endpoints..." -ForegroundColor Gray
+    Write-Host "This shows which proxy (if any) will be used for each URL" -ForegroundColor Gray
+    Write-Host ""
+
+# Collect ALL endpoints from connectivity results
+$allEndpointsToAnalyze = @()
+
+# Add Arc endpoints (from azcmagent check if available)
+$arcEndpoints = @(
+    @{URL = "https://ae.his.arc.azure.com:443"; Name = "Azure Arc - HIS Australia East"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://gbl.his.arc.azure.com:443"; Name = "Azure Arc - HIS Global"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://agentserviceapi.guestconfiguration.azure.com:443"; Name = "Azure Arc - Guest Config API"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://australiaeast-gas.guestconfiguration.azure.com:443"; Name = "Azure Arc - Guest Config Australia East"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://login.microsoftonline.com:443"; Name = "Azure AD Login"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://management.azure.com:443"; Name = "Azure Management API"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://pas.windows.net:443"; Name = "Azure PAS Service"; Category = "Azure Arc"; Mandatory = $true}
+)
+$allEndpointsToAnalyze += $arcEndpoints
+
+# Add MDE Extension endpoints
+$mdeExtensionEndpoints = @(
+    @{URL = "https://go.microsoft.com:443"; Name = "MDE Installer Download"; Category = "MDE Extension"; Mandatory = $true},
+    @{URL = "https://automatedirstrprdaue.blob.core.windows.net:443"; Name = "MDE Package Storage (AUE)"; Category = "MDE Extension"; Mandatory = $true},
+    @{URL = "https://automatedirstrprdaus.blob.core.windows.net:443"; Name = "MDE Package Storage (AUS)"; Category = "MDE Extension"; Mandatory = $true}
+)
+$allEndpointsToAnalyze += $mdeExtensionEndpoints
+
+# Add MDE Runtime endpoints (Mandatory)
+$mdeRuntimeMandatory = @(
+    @{URL = "https://winatp-gw-aus.microsoft.com:443"; Name = "MDE Gateway (AUS)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
+    @{URL = "https://winatp-gw-aue.microsoft.com:443"; Name = "MDE Gateway (AUE)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
+    @{URL = "https://winatp-gw-auc.microsoft.com:443"; Name = "MDE Gateway (AUC)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
+    @{URL = "https://edr-aue.au.endpoint.security.microsoft.com:443"; Name = "MDE EDR Australia Endpoint"; Category = "MDE Runtime - EDR"; Mandatory = $true},
+    @{URL = "https://au-v20.events.data.microsoft.com:443"; Name = "Cyber Data Australia"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
+    @{URL = "https://wdcp.microsoft.com:443"; Name = "Cloud-delivered Protection"; Category = "MDE Runtime - Protection"; Mandatory = $true},
+    @{URL = "https://wdcpalt.microsoft.com:443"; Name = "Cloud-delivered Protection (Alternate)"; Category = "MDE Runtime - Protection"; Mandatory = $true},
+    @{URL = "https://events.data.microsoft.com:443"; Name = "MDE Telemetry (Global)"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
+    @{URL = "https://x.cp.wd.microsoft.com:443"; Name = "MDE Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
+    @{URL = "https://cdn.x.cp.wd.microsoft.com:443"; Name = "MDE CDN Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
+    @{URL = "https://definitionupdates.microsoft.com:443"; Name = "Definition Updates"; Category = "MDE Runtime - Updates"; Mandatory = $true}
+)
+$allEndpointsToAnalyze += $mdeRuntimeMandatory
+
+# Add MDE Runtime endpoints (Optional)
+$mdeRuntimeOptional = @(
+    @{URL = "https://ctldl.windowsupdate.com:443"; Name = "Certificate Trust List"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "https://win.vortex.data.microsoft.com:443"; Name = "Windows Telemetry"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "https://settings-win.data.microsoft.com:443"; Name = "Windows Settings"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "https://fe3.delivery.mp.microsoft.com:443"; Name = "Windows Update Delivery"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "http://crl.microsoft.com:80"; Name = "Certificate Revocation List"; Category = "MDE Runtime - Optional"; Mandatory = $false}
+)
+$allEndpointsToAnalyze += $mdeRuntimeOptional
+
+# Analyze routing for each endpoint
+$routingResults = @()
+foreach ($endpoint in $allEndpointsToAnalyze) {
+    $routeInfo = Get-ActualProxyForUrl -Url $endpoint.URL
+    $routingResults += [PSCustomObject]@{
+        Category = $endpoint.Category
+        Name = $endpoint.Name
+        URL = $endpoint.URL
+        Mandatory = $endpoint.Mandatory
+        UsesProxy = $routeInfo.UsesProxy
+        ProxyAddress = $routeInfo.ProxyAddress
+        ProxyHost = $routeInfo.ProxyHost
+        ProxyPort = $routeInfo.ProxyPort
+        RoutingMethod = $routeInfo.RoutingMethod
+    }
+}
+
+# Group by routing method
+$proxyGroups = $routingResults | Where-Object { $_.UsesProxy } | Group-Object ProxyAddress
+$directEndpoints = $routingResults | Where-Object { -not $_.UsesProxy }
+
+# Display results grouped by proxy
+Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║  ROUTING ANALYSIS BY PROXY SERVER                       ║" -ForegroundColor Cyan
+Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+
+$proxyIndex = 1
+foreach ($proxyGroup in $proxyGroups) {
+    Write-Host "[$proxyIndex] PROXY: $($proxyGroup.Name)" -ForegroundColor Yellow
+    Write-Host "    Endpoints using this proxy: $($proxyGroup.Count)" -ForegroundColor Gray
+    Write-Host ""
+    
+    # Group by category
+    $categories = $proxyGroup.Group | Group-Object Category | Sort-Object Name
+    foreach ($cat in $categories) {
+        Write-Host "    📁 $($cat.Name) ($($cat.Count) endpoints)" -ForegroundColor Cyan
+        foreach ($ep in $cat.Group | Sort-Object Name) {
+            $mandatoryTag = if ($ep.Mandatory) { "[MANDATORY]" } else { "[OPTIONAL]" }
+            $tagColor = if ($ep.Mandatory) { "Red" } else { "DarkGray" }
+            Write-Host "       🔀 $($ep.Name)" -ForegroundColor White
+            Write-Host "          URL: $($ep.URL)" -ForegroundColor DarkGray
+            Write-Host "          Type: $mandatoryTag" -ForegroundColor $tagColor
+        }
+        Write-Host ""
+    }
+    $proxyIndex++
+}
+
+# Display direct connections
+if ($directEndpoints.Count -gt 0) {
+    Write-Host "[$proxyIndex] DIRECT CONNECTION (No Proxy)" -ForegroundColor Green
+    Write-Host "    Endpoints using direct connection: $($directEndpoints.Count)" -ForegroundColor Gray
+    Write-Host ""
+    
+    $categories = $directEndpoints | Group-Object Category | Sort-Object Name
+    foreach ($cat in $categories) {
+        Write-Host "    📁 $($cat.Name) ($($cat.Count) endpoints)" -ForegroundColor Cyan
+        foreach ($ep in $cat.Group | Sort-Object Name) {
+            $mandatoryTag = if ($ep.Mandatory) { "[MANDATORY]" } else { "[OPTIONAL]" }
+            $tagColor = if ($ep.Mandatory) { "Red" } else { "DarkGray" }
+            Write-Host "       ➡️  $($ep.Name)" -ForegroundColor White
+            Write-Host "          URL: $($ep.URL)" -ForegroundColor DarkGray
+            Write-Host "          Type: $mandatoryTag" -ForegroundColor $tagColor
+        }
+        Write-Host ""
+    }
+}
+
+# Summary statistics
+Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+Write-Host "║  ROUTING SUMMARY                                         ║" -ForegroundColor Yellow
+Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+Write-Host ""
+
+$totalEndpoints = $routingResults.Count
+$proxyEndpoints = ($routingResults | Where-Object { $_.UsesProxy }).Count
+$directEndpointsCount = ($routingResults | Where-Object { -not $_.UsesProxy }).Count
+$uniqueProxies = ($routingResults | Where-Object { $_.UsesProxy } | Select-Object -Unique ProxyAddress).Count
+
+Write-Host "   Total Endpoints Analyzed: $totalEndpoints" -ForegroundColor White
+Write-Host "   • Using Proxy:            $proxyEndpoints ($([math]::Round($proxyEndpoints/$totalEndpoints*100))%)" -ForegroundColor Cyan
+Write-Host "   • Using Direct:           $directEndpointsCount ($([math]::Round($directEndpointsCount/$totalEndpoints*100))%)" -ForegroundColor Green
+Write-Host "   • Unique Proxies Found:   $uniqueProxies" -ForegroundColor Yellow
+Write-Host ""
+
+# Detect specific scenarios
+$mandatoryViaProxy = ($routingResults | Where-Object { $_.Mandatory -and $_.UsesProxy }).Count
+$mandatoryDirect = ($routingResults | Where-Object { $_.Mandatory -and -not $_.UsesProxy }).Count
+
+if ($mandatoryViaProxy -gt 0 -and $mandatoryDirect -gt 0) {
+    Write-Host "   ⚠️  CRITICAL FINDING: Mixed Routing for MANDATORY Endpoints" -ForegroundColor Red
+    Write-Host "      • $mandatoryViaProxy mandatory endpoints use proxy" -ForegroundColor Yellow
+    Write-Host "      • $mandatoryDirect mandatory endpoints use direct connection" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "      IMPACT: If proxy requires authentication or blocks MDE traffic," -ForegroundColor Yellow
+    Write-Host "              endpoints routed through proxy will FAIL while direct" -ForegroundColor Yellow
+    Write-Host "              endpoints (like Arc Private Link) will work." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Check if Arc uses direct but MDE uses proxy
+$arcDirect = ($routingResults | Where-Object { $_.Category -eq "Azure Arc" -and -not $_.UsesProxy }).Count
+$mdeViaProxy = ($routingResults | Where-Object { $_.Category -like "MDE*" -and $_.UsesProxy }).Count
+
+if ($arcDirect -gt 0 -and $mdeViaProxy -gt 0) {
+    Write-Host "   🎯 ARC vs MDE ROUTING DIFFERENCE DETECTED:" -ForegroundColor Red
+    Write-Host "      • Azure Arc: $arcDirect endpoints use DIRECT (Private Link)" -ForegroundColor Green
+    Write-Host "      • MDE:       $mdeViaProxy endpoints use PROXY" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "      EXPLANATION: Arc works because it bypasses proxy via Private Link" -ForegroundColor Yellow
+    Write-Host "                   MDE fails because proxy blocks/requires auth for MDE URLs" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "      SOLUTIONS:" -ForegroundColor Yellow
+    Write-Host "      1. Configure MDE to use Private Link (like Arc does)" -ForegroundColor White
+    Write-Host "      2. Fix proxy to allow MDE traffic (add authentication if needed)" -ForegroundColor White
+    Write-Host "      3. Add MDE URLs to proxy bypass list" -ForegroundColor White
+    Write-Host ""
+}
+
+# Check for multiple proxies (PAC file indicator)
+if ($uniqueProxies -gt 1) {
+    Write-Host "   🔍 MULTIPLE PROXIES DETECTED ($uniqueProxies different proxies)" -ForegroundColor Yellow
+    Write-Host "      This indicates PAC file or advanced proxy routing rules" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "      Proxies found:" -ForegroundColor Gray
+    foreach ($proxy in ($routingResults | Where-Object { $_.UsesProxy } | Select-Object -Unique ProxyAddress)) {
+        $count = ($routingResults | Where-Object { $_.ProxyAddress -eq $proxy.ProxyAddress }).Count
+        Write-Host "      • $($proxy.ProxyAddress) ($count endpoints)" -ForegroundColor Cyan
+    }
+    Write-Host ""
+    Write-Host "      ACTION: Verify ALL proxies allow MDE traffic" -ForegroundColor Yellow
+    Write-Host "              Check if any proxy requires authentication" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Check if proxy detected but Get-ProxyConfiguration says "NOT DETECTED"
+if (-not $proxyConfig.ProxyEnabled -and $proxyEndpoints -gt 0) {
+    Write-Host "   ⚠️  PROXY DETECTION DISCREPANCY:" -ForegroundColor Red
+    Write-Host "      • Get-ProxyConfiguration: NOT DETECTED" -ForegroundColor Red
+    Write-Host "      • Actual routing analysis: $proxyEndpoints endpoints use proxy" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "      ROOT CAUSE: Proxy configured outside standard locations" -ForegroundColor Yellow
+    Write-Host "      Likely configured via:" -ForegroundColor Gray
+    Write-Host "      • PAC file (AutoConfigURL in IE settings)" -ForegroundColor Gray
+    Write-Host "      • WPAD via DHCP Option 252" -ForegroundColor Gray
+    Write-Host "      • WPAD via DNS (wpad.domain.com)" -ForegroundColor Gray
+    Write-Host "      • Browser-only proxy settings" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "      INVESTIGATION COMMANDS:" -ForegroundColor Yellow
+    Write-Host "      1. Check IE proxy: Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'" -ForegroundColor Cyan
+    Write-Host "      2. Check WPAD DNS: nslookup wpad" -ForegroundColor Cyan
+    Write-Host "      3. Check DHCP: ipconfig /all | Select-String 'DHCP'" -ForegroundColor Cyan
+    Write-Host "      4. Get PAC file: [System.Net.WebRequest]::DefaultWebProxy.GetProxy([Uri]'http://test.com')" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+Write-Host ""
+} catch {
+    Write-Host "⚠️  Error during proxy routing analysis: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "   Details: $($_.ScriptStackTrace)" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
 # Summary and Recommendations
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "      ISSUES `& RECOMMENDATIONS          " -ForegroundColor Cyan
@@ -3097,10 +4106,6 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         Write-Host ""
         Write-Host "           CURRENT STATUS CHECK:" -ForegroundColor Cyan
         Write-Host "           - Sense Service: $($status.MDE.SenseService)" -ForegroundColor $(if ($status.MDE.SenseService -eq "Running") {"Green"} else {"Red"})
-        Write-Host ""
-        Write-Host "           THE DIFFERENCE BETWEEN THIS SERVER AND WORKING SERVERS:" -ForegroundColor Cyan
-        Write-Host "           Working servers: Had connectivity when first onboarded → connected → got LastConnected value" -ForegroundColor Gray
-        Write-Host "           This server: Firewall blocked BEFORE first connection → never connected → no LastConnected" -ForegroundColor Gray
         Write-Host ""
         Write-Host "           HOW TO FIX:" -ForegroundColor Yellow
         Write-Host "           ===========" -ForegroundColor Yellow
