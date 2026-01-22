@@ -81,6 +81,14 @@ if ([string]::IsNullOrWhiteSpace($Region)) {
     Write-Host ""
 }
 
+# Force TLS 1.2 for HTTPS connections (required for modern endpoints)
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Write-Verbose "TLS 1.2 enabled for secure connections"
+} catch {
+    Write-Warning "Could not set TLS 1.2: $($_.Exception.Message)"
+}
+
 # Function to detect execution context
 function Get-ExecutionContext {
     try {
@@ -567,14 +575,24 @@ function Test-ConnectivityWithProxy {
                 if ($ProxyCredential) {
                     $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -Credential $ProxyCredential -ErrorAction Stop
                 } else {
-                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                    # Try without credentials first (for proxies that don't require auth)
+                    try {
+                        $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
+                    } catch {
+                        # If that fails, try with default credentials (for authenticated proxies)
+                        $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                    }
                 }
             } catch {
                 # Some servers reject GET, try HEAD
                 if ($ProxyCredential) {
                     $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -Credential $ProxyCredential -ErrorAction Stop
                 } else {
-                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                    try {
+                        $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
+                    } catch {
+                        $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                    }
                 }
             }
             return @{ Success = $true; Method = "Web Request (Proxy-aware)"; StatusCode = $response.StatusCode; TriedFallback = $false }
@@ -595,10 +613,11 @@ function Test-ConnectivityWithProxy {
                 [System.Net.WebRequest]::DefaultWebProxy = $noProxy
                 
                 # Try GET first, fallback to HEAD
+                # Note: Not using -Proxy parameter as DefaultWebProxy is already set
                 try {
-                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
                 } catch {
-                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
                 }
                 
                 # Restore original proxy
@@ -635,19 +654,31 @@ function Test-ConnectivityWithProxy {
         # Proxy method requested but no fallback
         try {
             # Try GET first, fallback to HEAD
-            # Use default credentials for proxy authentication
             try {
-                $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                # Try without credentials first
+                $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
             } catch {
-                $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                # If that fails, try with default credentials
+                $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
             }
             return @{ Success = $true; Method = "Web Request (Proxy-aware)"; StatusCode = $response.StatusCode; TriedFallback = $false }
         } catch {
-            $errorMsg = $_.Exception.Message
-            if ($_.Exception.InnerException) {
-                $errorMsg = $_.Exception.InnerException.Message
+            # Try HEAD method
+            try {
+                $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
+            } catch {
+                try {
+                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                    return @{ Success = $true; Method = "Web Request (Proxy-aware)"; StatusCode = $response.StatusCode; TriedFallback = $false }
+                } catch {
+                    $errorMsg = $_.Exception.Message
+                    if ($_.Exception.InnerException) {
+                        $errorMsg = $_.Exception.InnerException.Message
+                    }
+                    return @{ Success = $false; Method = "Web Request (Proxy-aware)"; StatusCode = 0; TriedFallback = $false; Error = $errorMsg }
+                }
             }
-            return @{ Success = $false; Method = "Web Request (Proxy-aware)"; StatusCode = 0; TriedFallback = $false; Error = $errorMsg }
+            return @{ Success = $true; Method = "Web Request (Proxy-aware)"; StatusCode = $response.StatusCode; TriedFallback = $false }
         }
     } else {
         # Direct connection only (bypass proxy completely)
@@ -658,10 +689,22 @@ function Test-ConnectivityWithProxy {
             [System.Net.WebRequest]::DefaultWebProxy = $noProxy
             
             # Try GET first, fallback to HEAD
+            # Try without credentials first, then with if needed
+            # Note: Not using -Proxy parameter as DefaultWebProxy is already set to bypass
             try {
-                $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+                try {
+                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
+                } catch {
+                    # Some endpoints may still need credentials even for direct connection
+                    $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                }
             } catch {
-                $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -Proxy $noProxy -UseDefaultCredentials -ErrorAction Stop
+                # Try HEAD method
+                try {
+                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
+                } catch {
+                    $response = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -UseDefaultCredentials -ErrorAction Stop
+                }
             }
             
             # Restore original proxy
@@ -2415,9 +2458,10 @@ $mdeEndpoints += @(
     
 foreach ($endpoint in $mdeEndpoints) {
         try {
-            $testUrl = "https://$($endpoint.URL):$($endpoint.Port)"
+            # Build URL without explicit port (let the protocol determine the port)
+            $testUrl = "https://$($endpoint.URL)"
             if ($endpoint.Port -eq 80) {
-                $testUrl = "http://$($endpoint.URL):$($endpoint.Port)"
+                $testUrl = "http://$($endpoint.URL)"
             }
             
             $testResult = Test-ConnectivityWithProxy -Url $testUrl -UseProxyMethod $UseProxy -TimeoutSeconds 10 -ProxyCredential $ProxyCredential
@@ -2431,8 +2475,14 @@ foreach ($endpoint in $mdeEndpoints) {
                 TestMethod = $testResult.Method
             }
         } catch {
+            # Build URL without explicit port for error case as well
+            $failedUrl = "https://$($endpoint.URL)"
+            if ($endpoint.Port -eq 80) {
+                $failedUrl = "http://$($endpoint.URL)"
+            }
+            
             $status.ConnectivityChecks += @{
-                URL = "https://$($endpoint.URL):$($endpoint.Port)"
+                URL = $failedUrl
                 Status = "Failed"
                 Category = $endpoint.Category
                 Description = $endpoint.Description
@@ -3635,47 +3685,47 @@ $allEndpointsToAnalyze = @()
 
 # Add Arc endpoints (from azcmagent check if available)
 $arcEndpoints = @(
-    @{URL = "https://ae.his.arc.azure.com:443"; Name = "Azure Arc - HIS Australia East"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://gbl.his.arc.azure.com:443"; Name = "Azure Arc - HIS Global"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://agentserviceapi.guestconfiguration.azure.com:443"; Name = "Azure Arc - Guest Config API"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://australiaeast-gas.guestconfiguration.azure.com:443"; Name = "Azure Arc - Guest Config Australia East"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://login.microsoftonline.com:443"; Name = "Azure AD Login"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://management.azure.com:443"; Name = "Azure Management API"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://pas.windows.net:443"; Name = "Azure PAS Service"; Category = "Azure Arc"; Mandatory = $true}
+    @{URL = "https://ae.his.arc.azure.com"; Name = "Azure Arc - HIS Australia East"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://gbl.his.arc.azure.com"; Name = "Azure Arc - HIS Global"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://agentserviceapi.guestconfiguration.azure.com"; Name = "Azure Arc - Guest Config API"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://australiaeast-gas.guestconfiguration.azure.com"; Name = "Azure Arc - Guest Config Australia East"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://login.microsoftonline.com"; Name = "Azure AD Login"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://management.azure.com"; Name = "Azure Management API"; Category = "Azure Arc"; Mandatory = $true},
+    @{URL = "https://pas.windows.net"; Name = "Azure PAS Service"; Category = "Azure Arc"; Mandatory = $true}
 )
 $allEndpointsToAnalyze += $arcEndpoints
 
 # Add MDE Extension endpoints
 $mdeExtensionEndpoints = @(
-    @{URL = "https://go.microsoft.com:443"; Name = "MDE Installer Download"; Category = "MDE Extension"; Mandatory = $true},
-    @{URL = "https://automatedirstrprdaue.blob.core.windows.net:443"; Name = "MDE Package Storage (AUE)"; Category = "MDE Extension"; Mandatory = $true},
-    @{URL = "https://automatedirstrprdaus.blob.core.windows.net:443"; Name = "MDE Package Storage (AUS)"; Category = "MDE Extension"; Mandatory = $true}
+    @{URL = "https://go.microsoft.com"; Name = "MDE Installer Download"; Category = "MDE Extension"; Mandatory = $true},
+    @{URL = "https://automatedirstrprdaue.blob.core.windows.net"; Name = "MDE Package Storage (AUE)"; Category = "MDE Extension"; Mandatory = $true},
+    @{URL = "https://automatedirstrprdaus.blob.core.windows.net"; Name = "MDE Package Storage (AUS)"; Category = "MDE Extension"; Mandatory = $true}
 )
 $allEndpointsToAnalyze += $mdeExtensionEndpoints
 
 # Add MDE Runtime endpoints (Mandatory)
 $mdeRuntimeMandatory = @(
-    @{URL = "https://winatp-gw-aus.microsoft.com:443"; Name = "MDE Gateway (AUS)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
-    @{URL = "https://winatp-gw-aue.microsoft.com:443"; Name = "MDE Gateway (AUE)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
-    @{URL = "https://winatp-gw-auc.microsoft.com:443"; Name = "MDE Gateway (AUC)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
-    @{URL = "https://edr-aue.au.endpoint.security.microsoft.com:443"; Name = "MDE EDR Australia Endpoint"; Category = "MDE Runtime - EDR"; Mandatory = $true},
-    @{URL = "https://au-v20.events.data.microsoft.com:443"; Name = "Cyber Data Australia"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
-    @{URL = "https://wdcp.microsoft.com:443"; Name = "Cloud-delivered Protection"; Category = "MDE Runtime - Protection"; Mandatory = $true},
-    @{URL = "https://wdcpalt.microsoft.com:443"; Name = "Cloud-delivered Protection (Alternate)"; Category = "MDE Runtime - Protection"; Mandatory = $true},
-    @{URL = "https://events.data.microsoft.com:443"; Name = "MDE Telemetry (Global)"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
-    @{URL = "https://x.cp.wd.microsoft.com:443"; Name = "MDE Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
-    @{URL = "https://cdn.x.cp.wd.microsoft.com:443"; Name = "MDE CDN Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
-    @{URL = "https://definitionupdates.microsoft.com:443"; Name = "Definition Updates"; Category = "MDE Runtime - Updates"; Mandatory = $true}
+    @{URL = "https://winatp-gw-aus.microsoft.com"; Name = "MDE Gateway (AUS)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
+    @{URL = "https://winatp-gw-aue.microsoft.com"; Name = "MDE Gateway (AUE)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
+    @{URL = "https://winatp-gw-auc.microsoft.com"; Name = "MDE Gateway (AUC)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
+    @{URL = "https://edr-aue.au.endpoint.security.microsoft.com"; Name = "MDE EDR Australia Endpoint"; Category = "MDE Runtime - EDR"; Mandatory = $true},
+    @{URL = "https://au-v20.events.data.microsoft.com"; Name = "Cyber Data Australia"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
+    @{URL = "https://wdcp.microsoft.com"; Name = "Cloud-delivered Protection"; Category = "MDE Runtime - Protection"; Mandatory = $true},
+    @{URL = "https://wdcpalt.microsoft.com"; Name = "Cloud-delivered Protection (Alternate)"; Category = "MDE Runtime - Protection"; Mandatory = $true},
+    @{URL = "https://events.data.microsoft.com"; Name = "MDE Telemetry (Global)"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
+    @{URL = "https://x.cp.wd.microsoft.com"; Name = "MDE Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
+    @{URL = "https://cdn.x.cp.wd.microsoft.com"; Name = "MDE CDN Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
+    @{URL = "https://definitionupdates.microsoft.com"; Name = "Definition Updates"; Category = "MDE Runtime - Updates"; Mandatory = $true}
 )
 $allEndpointsToAnalyze += $mdeRuntimeMandatory
 
 # Add MDE Runtime endpoints (Optional)
 $mdeRuntimeOptional = @(
-    @{URL = "https://ctldl.windowsupdate.com:443"; Name = "Certificate Trust List"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "https://win.vortex.data.microsoft.com:443"; Name = "Windows Telemetry"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "https://settings-win.data.microsoft.com:443"; Name = "Windows Settings"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "https://fe3.delivery.mp.microsoft.com:443"; Name = "Windows Update Delivery"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "http://crl.microsoft.com:80"; Name = "Certificate Revocation List"; Category = "MDE Runtime - Optional"; Mandatory = $false}
+    @{URL = "https://ctldl.windowsupdate.com"; Name = "Certificate Trust List"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "https://win.vortex.data.microsoft.com"; Name = "Windows Telemetry"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "https://settings-win.data.microsoft.com"; Name = "Windows Settings"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "https://fe3.delivery.mp.microsoft.com"; Name = "Windows Update Delivery"; Category = "MDE Runtime - Optional"; Mandatory = $false},
+    @{URL = "http://crl.microsoft.com"; Name = "Certificate Revocation List"; Category = "MDE Runtime - Optional"; Mandatory = $false}
 )
 $allEndpointsToAnalyze += $mdeRuntimeOptional
 
