@@ -533,86 +533,86 @@ function Get-BuiltinMinimalList {
     $allEndpoints = @(
         # ===== CORE MDE ENDPOINTS =====
         # Core MDE endpoints (WW) - Required
-        @{Domain='go.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='api.security.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'},
-        @{Domain='endpoint.security.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'},
-        @{Domain='securitycenter.windows.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='login.microsoftonline.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='login.windows.net'; Geo='WW'; Model='Streamlined'; Service='MDE'},
+        @{Domain='go.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='MDE Installer & Updates'},
+        @{Domain='api.security.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='MDE API Endpoint'},
+        @{Domain='endpoint.security.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='MDE Security Endpoint'},
+        @{Domain='securitycenter.windows.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Security Center Portal'},
+        @{Domain='login.microsoftonline.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Azure AD Authentication'},
+        @{Domain='login.windows.net'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='Azure AD Authentication Alt'},
         
         # United States specific MDE endpoints - Required
-        @{Domain='winatp-gw-us.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'},
-        @{Domain='winatp-gw-use.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'},
-        @{Domain='winatp-gw-usw.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'},
-        @{Domain='us-v20.events.data.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'},
-        @{Domain='automatedirstrprdusc.blob.core.windows.net'; Geo='US'; Model='Streamlined'; Service='MDE'},
-        @{Domain='automatedirstrprduse.blob.core.windows.net'; Geo='US'; Model='Streamlined'; Service='MDE'},
+        @{Domain='winatp-gw-us.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'; Purpose='MDE Gateway US'},
+        @{Domain='winatp-gw-use.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'; Purpose='MDE Gateway US East'},
+        @{Domain='winatp-gw-usw.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'; Purpose='MDE Gateway US West'},
+        @{Domain='us-v20.events.data.microsoft.com'; Geo='US'; Model='Both'; Service='MDE'; Purpose='Cyber Data US'},
+        @{Domain='automatedirstrprdusc.blob.core.windows.net'; Geo='US'; Model='Streamlined'; Service='MDE'; Purpose='MDE Package Storage US Central'},
+        @{Domain='automatedirstrprduse.blob.core.windows.net'; Geo='US'; Model='Streamlined'; Service='MDE'; Purpose='MDE Package Storage US East'},
         
         # Australia specific MDE endpoints - Required
-        @{Domain='endpoint-aus.security.microsoft.com'; Geo='AU'; Model='Streamlined'; Service='MDE'},
-        @{Domain='endpoint-aue.security.microsoft.com'; Geo='AU'; Model='Streamlined'; Service='MDE'},
-        @{Domain='winatp-gw-aus.microsoft.com'; Geo='AU'; Model='Both'; Service='MDE'},
-        @{Domain='winatp-gw-aue.microsoft.com'; Geo='AU'; Model='Both'; Service='MDE'},
-        @{Domain='automatedirstrprdaue.blob.core.windows.net'; Geo='AU'; Model='Streamlined'; Service='MDE'},
-        @{Domain='automatedirstrprdaus.blob.core.windows.net'; Geo='AU'; Model='Both'; Service='MDE'},
-        @{Domain='au-v20.events.data.microsoft.com'; Geo='AU'; Model='Both'; Service='MDE'},
+        @{Domain='endpoint-aus.security.microsoft.com'; Geo='AU'; Model='Streamlined'; Service='MDE'; Purpose='MDE Endpoint AU South'},
+        @{Domain='endpoint-aue.security.microsoft.com'; Geo='AU'; Model='Streamlined'; Service='MDE'; Purpose='MDE Endpoint AU East'},
+        @{Domain='winatp-gw-aus.microsoft.com'; Geo='AU'; Model='Both'; Service='MDE'; Purpose='MDE Gateway AU South'},
+        @{Domain='winatp-gw-aue.microsoft.com'; Geo='AU'; Model='Both'; Service='MDE'; Purpose='MDE Gateway AU East'},
+        @{Domain='automatedirstrprdaue.blob.core.windows.net'; Geo='AU'; Model='Streamlined'; Service='MDE'; Purpose='MDE Package Storage AU East'},
+        @{Domain='automatedirstrprdaus.blob.core.windows.net'; Geo='AU'; Model='Both'; Service='MDE'; Purpose='MDE Package Storage AU South'},
+        @{Domain='au-v20.events.data.microsoft.com'; Geo='AU'; Model='Both'; Service='MDE'; Purpose='Cyber Data AU'},
         
         # MDE Telemetry & Optional endpoints (WW)
-        @{Domain='events.data.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='settings-win.data.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='ris.api.iris.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'},
-        @{Domain='wdcp.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='wdcpalt.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'},
-        @{Domain='x.cp.wd.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
+        @{Domain='events.data.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='MDE Telemetry'},
+        @{Domain='settings-win.data.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Windows Settings'},
+        @{Domain='ris.api.iris.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='Iris API Service'},
+        @{Domain='wdcp.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Cloud Protection'},
+        @{Domain='wdcpalt.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='Cloud Protection Alt'},
+        @{Domain='x.cp.wd.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Content Delivery'},
         
         # MDE Updates & Definitions (WW)
-        @{Domain='definitionupdates.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='fe3.delivery.mp.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
+        @{Domain='definitionupdates.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Definition Updates'},
+        @{Domain='fe3.delivery.mp.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Windows Update Delivery'},
         
         # MDE Management & Onboarding (WW only)
-        @{Domain='onboardingpackageseusprd.blob.core.windows.net'; Geo='WW'; Model='Streamlined'; Service='MDE'},
-        @{Domain='winatpmanagement.windows.com'; Geo='WW'; Model='Streamlined'; Service='MDE'},
+        @{Domain='onboardingpackageseusprd.blob.core.windows.net'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='Onboarding Packages'},
+        @{Domain='winatpmanagement.windows.com'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='MDE Management'},
         
         # Certificate validation (WW) - Optional
-        @{Domain='crl.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='ctldl.windowsupdate.com'; Geo='WW'; Model='Both'; Service='MDE'},
-        @{Domain='www.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'},
+        @{Domain='crl.microsoft.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Certificate Revocation'},
+        @{Domain='ctldl.windowsupdate.com'; Geo='WW'; Model='Both'; Service='MDE'; Purpose='Certificate Trust List'},
+        @{Domain='www.microsoft.com'; Geo='WW'; Model='Streamlined'; Service='MDE'; Purpose='Microsoft Homepage'},
         
         # ===== AZURE ARC CORE ENDPOINTS =====
         # Azure Arc Core Services (WW) - Required for Arc-enabled servers
-        @{Domain='management.azure.com'; Geo='WW'; Model='Both'; Service='Arc'},
-        @{Domain='pas.windows.net'; Geo='WW'; Model='Both'; Service='Arc'},
-        @{Domain='guestnotificationservice.azure.com'; Geo='WW'; Model='Both'; Service='Arc'},
-        @{Domain='his.arc.azure.com'; Geo='WW'; Model='Both'; Service='Arc'},
-        @{Domain='guestconfiguration.azure.com'; Geo='WW'; Model='Both'; Service='Arc'},
+        @{Domain='management.azure.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Azure Management API'},
+        @{Domain='pas.windows.net'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Azure PAS Service'},
+        @{Domain='guestnotificationservice.azure.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Guest Notification Service'},
+        @{Domain='his.arc.azure.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Hybrid Identity Service'},
+        @{Domain='guestconfiguration.azure.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Guest Configuration Service'},
         
         # Azure Arc - Private Link Endpoints (commonly used with Private Endpoint)
-        @{Domain='ae.his.arc.azure.com'; Geo='AU'; Model='Both'; Service='Arc'},
-        @{Domain='gbl.his.arc.azure.com'; Geo='WW'; Model='Both'; Service='Arc'},
-        @{Domain='agentserviceapi.guestconfiguration.azure.com'; Geo='WW'; Model='Both'; Service='Arc'},
-        @{Domain='australiaeast-gas.guestconfiguration.azure.com'; Geo='AU'; Model='Both'; Service='Arc'},
+        @{Domain='ae.his.arc.azure.com'; Geo='AU'; Model='Both'; Service='Arc'; Purpose='HIS Private Link AU East'},
+        @{Domain='gbl.his.arc.azure.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='HIS Private Link Global'},
+        @{Domain='agentserviceapi.guestconfiguration.azure.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Guest Config API Private Link'},
+        @{Domain='australiaeast-gas.guestconfiguration.azure.com'; Geo='AU'; Model='Both'; Service='Arc'; Purpose='Guest Config AU East Private Link'},
         
         # Azure Arc - Australia Region Endpoints
-        @{Domain='aus.his.arc.azure.com'; Geo='AU'; Model='Both'; Service='Arc'},
-        @{Domain='aus2.his.arc.azure.com'; Geo='AU'; Model='Both'; Service='Arc'},
-        @{Domain='australiaeast-dp.guestconfiguration.azure.com'; Geo='AU'; Model='Both'; Service='Arc'},
-        @{Domain='australiasoutheast-dp.guestconfiguration.azure.com'; Geo='AU'; Model='Both'; Service='Arc'},
+        @{Domain='aus.his.arc.azure.com'; Geo='AU'; Model='Both'; Service='Arc'; Purpose='HIS AU South'},
+        @{Domain='aus2.his.arc.azure.com'; Geo='AU'; Model='Both'; Service='Arc'; Purpose='HIS AU South 2'},
+        @{Domain='australiaeast-dp.guestconfiguration.azure.com'; Geo='AU'; Model='Both'; Service='Arc'; Purpose='Guest Config Data Plane AU East'},
+        @{Domain='australiasoutheast-dp.guestconfiguration.azure.com'; Geo='AU'; Model='Both'; Service='Arc'; Purpose='Guest Config Data Plane AU SE'},
         
         # Azure Arc - Download & Package Management
-        @{Domain='download.microsoft.com'; Geo='WW'; Model='Both'; Service='Arc'},
-        @{Domain='packages.microsoft.com'; Geo='WW'; Model='Both'; Service='Arc'},
+        @{Domain='download.microsoft.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Microsoft Downloads'},
+        @{Domain='packages.microsoft.com'; Geo='WW'; Model='Both'; Service='Arc'; Purpose='Package Repository'},
         
         # ===== AZURE ARC EXTENSIONS =====
         # MDE Extension for Azure Arc (Australia region only)
-        @{Domain='australia.cp.wd.microsoft.com'; Geo='AU'; Model='Both'; Service='Ext'},
+        @{Domain='australia.cp.wd.microsoft.com'; Geo='AU'; Model='Both'; Service='Ext'; Purpose='MDE Extension Content AU'},
         
         # SQL Server Extension for Azure Arc (Monitoring & Log Analytics)
-        @{Domain='san-af-aus-prod.azurewebsites.net'; Geo='AU'; Model='Both'; Service='Ext'},
-        @{Domain='aus.handler.control.monitor.azure.com'; Geo='AU'; Model='Both'; Service='Ext'},
-        @{Domain='dc.services.visualstudio.com'; Geo='WW'; Model='Both'; Service='Ext'},
+        @{Domain='san-af-aus-prod.azurewebsites.net'; Geo='AU'; Model='Both'; Service='Ext'; Purpose='SQL Extension Service AU'},
+        @{Domain='aus.handler.control.monitor.azure.com'; Geo='AU'; Model='Both'; Service='Ext'; Purpose='Monitor Handler AU'},
+        @{Domain='dc.services.visualstudio.com'; Geo='WW'; Model='Both'; Service='Ext'; Purpose='Application Insights'},
         
         # Azure Monitor Agent Extension (if using monitoring)
-        @{Domain='global.handler.control.monitor.azure.com'; Geo='WW'; Model='Both'; Service='Ext'}
+        @{Domain='global.handler.control.monitor.azure.com'; Geo='WW'; Model='Both'; Service='Ext'; Purpose='Monitor Handler Global'}
     )
 
     # Filter by region: return WW + selected region endpoints only
@@ -759,6 +759,7 @@ foreach ($d in $domains) {
     $geography = if ($d -is [hashtable]) { $d.Geo } else { 'WW' }
     $modelTag = if ($d -is [hashtable]) { $d.Model } else { 'Unknown' }
     $serviceTag = if ($d -is [hashtable] -and $d.Service) { $d.Service } else { 'MDE' }
+    $purposeTag = if ($d -is [hashtable] -and $d.Purpose) { $d.Purpose } else { '-' }
     
     $hostname = $domain -replace '^\*\.', 'www.'  # basic wildcard normalization for testing
     $testUrl = "https://{0}/" -f $hostname
@@ -815,6 +816,7 @@ foreach ($d in $domains) {
         Geography    = $geography
         Model        = $modelTag
         Service      = $serviceTag
+        Purpose      = $purposeTag
         Route        = $routingType
         PrivateLink  = $dns.HasPrivateLink
         PvtLinkType  = $dns.PrivateLinkMethod
@@ -836,15 +838,17 @@ Write-Host "Proxy IP: Shows actual proxy server IP when proxy routing detected, 
 Write-Host "PvtLink: Shows 'Yes' if Azure Private Link/Private Endpoint detected (CNAME or Private IP), 'No' otherwise" -ForegroundColor Cyan
 Write-Host ""
 
-# Calculate maximum domain length for consistent column width
+# Calculate maximum domain and purpose length for consistent column width
 $maxDomainWidth = ($results | ForEach-Object { $_.Domain.Length } | Measure-Object -Maximum).Maximum
 if ($maxDomainWidth -lt 6) { $maxDomainWidth = 6 }  # Minimum width for "Domain" header
+$maxPurposeWidth = ($results | ForEach-Object { $_.Purpose.Length } | Measure-Object -Maximum).Maximum
+if ($maxPurposeWidth -lt 7) { $maxPurposeWidth = 7 }  # Minimum width for "Purpose" header
 
 # Display table header with improved spacing for better visibility
-Write-Host ("  {0,3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-4}  {8,-8}  {9,-6}  {10,-6}  {11,-16}  {12,-13}  {13}" -f `
-    "#", "Geo", "Svc", "Type", "Route", "PvtLink", "Domain", "DNS", "TCP:443", "HTTPS", "Status", "Target IP", "Next Hop", "Proxy IP") -ForegroundColor Cyan
-Write-Host ("  {0,-3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-4}  {8,-8}  {9,-6}  {10,-6}  {11,-16}  {12,-13}  {13}" -f `
-    "-", "---", "---", "------", "------", "--------------", ("-" * $maxDomainWidth), "---", "-------", "------", "------", "---------", "--------", "--------") -ForegroundColor Cyan
+Write-Host ("  {0,3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-$maxPurposeWidth}  {8,-4}  {9,-8}  {10,-6}  {11,-6}  {12,-16}  {13,-13}  {14}" -f `
+    "#", "Geo", "Svc", "Type", "Route", "PvtLink", "Domain", "Purpose", "DNS", "TCP:443", "HTTPS", "Status", "Target IP", "Next Hop", "Proxy IP") -ForegroundColor Cyan
+Write-Host ("  {0,-3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-$maxPurposeWidth}  {8,-4}  {9,-8}  {10,-6}  {11,-6}  {12,-16}  {13,-13}  {14}" -f `
+    "-", "---", "---", "------", "------", "--------------", ("-" * $maxDomainWidth), ("-" * $maxPurposeWidth), "---", "-------", "------", "------", "---------", "--------", "--------") -ForegroundColor Cyan
 
 # Display results with color-coded symbols
 foreach ($r in $results) {
@@ -874,6 +878,9 @@ foreach ($r in $results) {
     
     # Domain column
     Write-Host ("{0,-$maxDomainWidth}  " -f $r.Domain) -NoNewline
+    
+    # Purpose column
+    Write-Host ("{0,-$maxPurposeWidth}  " -f $r.Purpose) -ForegroundColor Gray -NoNewline
     
     # DNS column (4 chars width + 2 spaces)
     Write-Host ("{0,-4}  " -f $dnsSymbol) -ForegroundColor $dnsColor -NoNewline
