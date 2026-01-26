@@ -2,9 +2,10 @@
 # Compatible: Windows Server 2012 R2 to 2025
 # Run as Administrator
 #
-# Usage: .\ValidateArcMDE.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"]
+# Usage: .\ValidateArcMDE.ps1 -ExpectedOrgId "<MDE_ORG_ID>" [-Region "<REGION>"] [-Summary]
 # Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
 # Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" -Region "US"
+# Example: .\ValidateArcMDE.ps1 -ExpectedOrgId "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" -Summary  # Compact output
 
 <#
 .SYNOPSIS
@@ -71,7 +72,13 @@ param(
     
     [Parameter(Mandatory=$false, HelpMessage="Explicit credentials for proxy authentication. Use when running as SYSTEM or service account. Example: Get-Credential")]
     [System.Management.Automation.PSCredential]
-    $ProxyCredential
+    $ProxyCredential,
+    
+    [Parameter(
+        Mandatory=$false,
+        HelpMessage="Show compact summary output only. Use for quick status checks."
+    )]
+    [switch]$Summary = $false
 )
 
 # Ensure Region has a valid value (defense against empty strings)
@@ -539,6 +546,59 @@ function Get-ActualProxyForUrl {
     }
 }
 
+# Function to test connectivity using DNS + TCP (more accurate than HTTP for MDE endpoints)
+function Test-EndpointConnectivity {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Hostname,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$Port = 443,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutMs = 5000
+    )
+    
+    $result = @{
+        Success = $false
+        DnsResolved = $false
+        TcpConnected = $false
+        IPAddress = $null
+        Error = $null
+    }
+    
+    # Step 1: DNS Resolution
+    try {
+        $dnsResult = [System.Net.Dns]::GetHostAddresses($Hostname) | Select-Object -First 1
+        if ($dnsResult) {
+            $result.DnsResolved = $true
+            $result.IPAddress = $dnsResult.IPAddressToString
+        }
+    } catch {
+        $result.Error = "DNS: $($_.Exception.Message)"
+        return $result
+    }
+    
+    # Step 2: TCP Connection Test
+    try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $connect = $tcpClient.BeginConnect($Hostname, $Port, $null, $null)
+        $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
+        
+        if ($wait -and $tcpClient.Connected) {
+            $result.TcpConnected = $true
+            $result.Success = $true
+        } else {
+            $result.Error = "TCP: Connection timeout"
+        }
+        $tcpClient.Close()
+    } catch {
+        $result.Error = "TCP: $($_.Exception.Message)"
+    }
+    
+    return $result
+}
+
 # Function to test connectivity with proxy support and automatic fallback
 function Test-ConnectivityWithProxy {
     param(
@@ -767,158 +827,30 @@ if ($ForceDirectConnection) {
 }
 
 Write-Host "=== Azure Arc-Enabled Server Status Check ===" -ForegroundColor Cyan
-Write-Host "Server: $($env:COMPUTERNAME)" -ForegroundColor Yellow
-Write-Host "Current Date: $(Get-Date)" -ForegroundColor Yellow
-Write-Host "Region: $Region" -ForegroundColor Yellow
-Write-Host "Execution Context: $($scriptExecutionContext.AccountType) ($($scriptExecutionContext.UserName))" -ForegroundColor $(if ($scriptExecutionContext.AccountType -eq "User Account") { "Green" } else { "Yellow" })
-if ($SkipArc) {
-    Write-Host "Arc Validation: SKIPPED" -ForegroundColor Yellow
-}
-
-Write-Host ""
-Write-Host "╔═══════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║     PROXY DETECTION & CONNECTIVITY APPROACH       ║" -ForegroundColor Cyan
-Write-Host "╚═══════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "Server: $($env:COMPUTERNAME) | Region: $Region | Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor Yellow
+if ($SkipArc) { Write-Host "Arc Validation: SKIPPED" -ForegroundColor Yellow }
+if ($Summary) { Write-Host "Output Mode: SUMMARY (use without -Summary for full details)" -ForegroundColor Cyan }
 Write-Host ""
 
+# Proxy Detection (condensed)
+Write-Host "Network Configuration:" -ForegroundColor Cyan
 if ($proxyConfig.ProxyEnabled) {
-    Write-Host "Proxy Status: DETECTED" -ForegroundColor Green
-    Write-Host "  Detection Method: $($proxyConfig.Method)" -ForegroundColor Gray
-    if ($proxyConfig.DetectionSource -and $proxyConfig.DetectionSource.Count -gt 0) {
-        Write-Host "  Detection Source: $($proxyConfig.DetectionSource -join ', ')" -ForegroundColor Gray
-    }
-    
-    # Test proxy authentication
-    Write-Host ""
-    Write-Host "  Testing proxy authentication..." -ForegroundColor Gray
-    
-    # Check if running as SYSTEM/Service Account and warn
-    if (-not $scriptExecutionContext.SupportsDefaultCredentials) {
-        Write-Host "  ⚠️  WARNING: Running as $($scriptExecutionContext.AccountType)" -ForegroundColor Yellow
-        Write-Host "     $($scriptExecutionContext.Warning)" -ForegroundColor Yellow
-        if ($ProxyCredential) {
-            Write-Host "     ✅ Explicit credentials provided via -ProxyCredential" -ForegroundColor Green
-            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com" -Credential $ProxyCredential
-        } else {
-            Write-Host "     💡 Use -ProxyCredential parameter to provide explicit credentials" -ForegroundColor Cyan
-            Write-Host "        Example: -ProxyCredential (Get-Credential)" -ForegroundColor Gray
-            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com"
-        }
-    } else {
-        # Running as user account - use provided credentials or default
-        if ($ProxyCredential) {
-            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com" -Credential $ProxyCredential
-        } else {
-            $proxyAuthTest = Test-ProxyAuthentication -TestUrl "https://www.microsoft.com"
-        }
-    }
-    
-    if ($proxyAuthTest.TestPassed) {
-        Write-Host "  Proxy Authentication: " -NoNewline -ForegroundColor Gray
-        Write-Host "$($proxyAuthTest.AuthType)" -ForegroundColor Green
-        if ($proxyAuthTest.RequiresAuth) {
-            if ($ProxyCredential) {
-                Write-Host "    └─ Using provided credentials for proxy" -ForegroundColor Cyan
-            } else {
-                Write-Host "    └─ Using Windows credentials (current user context)" -ForegroundColor Cyan
-            }
-        } else {
-            Write-Host "    └─ No authentication required" -ForegroundColor Cyan
-        }
-    } else {
-        Write-Host "  Proxy Authentication: " -NoNewline -ForegroundColor Gray
-        Write-Host "FAILED" -ForegroundColor Red
-        Write-Host "    └─ $($proxyAuthTest.Message)" -ForegroundColor Yellow
-        if ($proxyAuthTest.Error) {
-            Write-Host "    └─ Error: $($proxyAuthTest.Error)" -ForegroundColor DarkGray
-        }
-        if (-not $scriptExecutionContext.SupportsDefaultCredentials -and -not $ProxyCredential) {
-            Write-Host "    └─ Consider using -ProxyCredential parameter" -ForegroundColor Yellow
-        }
-    }
-    
-    if ($proxyConfig.WPADDetected) {
-        Write-Host ""
-        Write-Host "  WPAD (Web Proxy Auto-Discovery): ENABLED" -ForegroundColor Cyan
-        Write-Host "    ├─ Automatically detect settings: YES" -ForegroundColor Gray
-        Write-Host "    ├─ Discovery Method: DNS/DHCP query for wpad.dat" -ForegroundColor Gray
-        Write-Host "    └─ Proxy will be resolved automatically at runtime" -ForegroundColor Gray
-    }
-    
-    if ($proxyConfig.ProxyServer) {
-        Write-Host "  Manual Proxy Server: $($proxyConfig.ProxyServer)" -ForegroundColor Gray
-    }
-    
-    if ($proxyConfig.ProxyAutoConfigURL) {
-        Write-Host "  PAC File URL: $($proxyConfig.ProxyAutoConfigURL)" -ForegroundColor Gray
-    }
-    
-    if ($proxyConfig.ProxyBypass) {
-        Write-Host "  Bypass List: $($proxyConfig.ProxyBypass)" -ForegroundColor Gray
-    }
-    
-    Write-Host ""
-    Write-Host "Connectivity Strategy: $connectivityApproach" -ForegroundColor Yellow
-    Write-Host "  1. Try proxy-aware connection first (Invoke-WebRequest)" -ForegroundColor Gray
-    Write-Host "     └─ Will use detected proxy (WPAD/PAC/Manual)" -ForegroundColor Gray
-    if ($ProxyCredential) {
-        Write-Host "     └─ Credentials: Using provided credentials (-ProxyCredential)" -ForegroundColor Cyan
-    } else {
-        Write-Host "     └─ Credentials: Using Windows Authentication (UseDefaultCredentials)" -ForegroundColor Cyan
-        if (-not $scriptExecutionContext.SupportsDefaultCredentials) {
-            Write-Host "        ⚠️  Running as $($scriptExecutionContext.AccountType) - may need -ProxyCredential" -ForegroundColor Yellow
-        }
-    }
-    Write-Host "  2. If proxy fails, automatically fallback to direct connection" -ForegroundColor Gray
-    Write-Host "     └─ Uses Invoke-WebRequest with proxy disabled" -ForegroundColor Gray
-    
-    if ($ForceDirectConnection) {
-        Write-Host ""
-        Write-Host "  NOTE: -ForceDirectConnection specified, bypassing proxy" -ForegroundColor Red
-    }
+    $proxyAuthTest = if ($ProxyCredential) { Test-ProxyAuthentication -TestUrl "https://www.microsoft.com" -Credential $ProxyCredential } else { Test-ProxyAuthentication -TestUrl "https://www.microsoft.com" }
+    $authStatus = if ($proxyAuthTest.TestPassed) { "OK" } else { "FAILED" }
+    Write-Host "  Proxy: DETECTED ($($proxyConfig.Method))" -ForegroundColor Green
+    if ($proxyConfig.ProxyServer) { Write-Host "  Server: $($proxyConfig.ProxyServer)" -ForegroundColor Gray }
+    Write-Host "  Auth: $authStatus" -ForegroundColor $(if ($authStatus -eq "OK") { "Green" } else { "Red" })
+    Write-Host "  Strategy: $connectivityApproach" -ForegroundColor Gray
 } else {
-    Write-Host "Proxy Status: NOT DETECTED" -ForegroundColor Yellow
-    Write-Host "  WPAD: Not enabled" -ForegroundColor Gray
-    Write-Host "  Manual Proxy: Not configured" -ForegroundColor Gray
-    Write-Host "  PAC File: Not configured" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "Connectivity Strategy: $connectivityApproach" -ForegroundColor Yellow
-    Write-Host "  └─ Using Invoke-WebRequest with direct connection (no proxy)" -ForegroundColor Gray
-    Write-Host "  └─ Credentials: Using Windows Authentication if needed" -ForegroundColor Cyan
+    Write-Host "  Proxy: Not detected (direct connection)" -ForegroundColor Gray
 }
 
-# Check for Private Link configuration
-Write-Host ""
+# Private Link (condensed)
 if ($privateLinkConfig.ArcPrivateLinkDetected) {
-    Write-Host "╔═══════════════════════════════════════════════════╗" -ForegroundColor Yellow
-    Write-Host "║     ⚠️  PRIVATE LINK DETECTED                     ║" -ForegroundColor Yellow
-    Write-Host "╚═══════════════════════════════════════════════════╝" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Azure Arc Private Link: ENABLED" -ForegroundColor Yellow
-    Write-Host "  Private Endpoints Found: $($privateLinkConfig.PrivateEndpoints.Count)" -ForegroundColor Gray
-    foreach ($i in 0..($privateLinkConfig.PrivateEndpoints.Count - 1)) {
-        if ($i -lt $privateLinkConfig.PrivateIPs.Count) {
-            Write-Host "    • $($privateLinkConfig.PrivateEndpoints[$i]) → $($privateLinkConfig.PrivateIPs[$i])" -ForegroundColor Gray
-        }
-    }
-    Write-Host ""
-    Write-Host "⚠️  IMPORTANT: MDE Connectivity Impact" -ForegroundColor Yellow
-    Write-Host "  ────────────────────────────────────────────" -ForegroundColor Gray
-    Write-Host "  • Azure Arc uses Private Link (working via private IPs)" -ForegroundColor Cyan
-    Write-Host "  • MDE tests use PUBLIC endpoints" -ForegroundColor Red
-    Write-Host "  • If firewall blocks public internet, MDE tests will FAIL" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  Solutions:" -ForegroundColor Yellow
-    Write-Host "    1. Configure MDE to use Private Link endpoints" -ForegroundColor Green
-    Write-Host "       https://learn.microsoft.com/en-us/defender-endpoint/configure-private-link" -ForegroundColor Gray
-    Write-Host "    2. Add firewall rules for MDE public endpoints" -ForegroundColor Green
-    Write-Host "       (See connectivity check results below)" -ForegroundColor Gray
-    Write-Host ""
+    Write-Host "  Private Link: DETECTED (Arc endpoints resolve to private IPs)" -ForegroundColor Yellow
 }
-
 Write-Host ""
-Write-Host "Collecting status information..." -ForegroundColor Cyan
-Write-Host ""
+Write-Host "Collecting status information..." -ForegroundColor Gray
 
 # Initialize status collection
 $status = @{
@@ -1201,29 +1133,7 @@ try {
             $status.MDE.PlatformVersion = if ($mpStatus.AMProductVersion) { $mpStatus.AMProductVersion } else { "Unknown" }
             $status.MDE.EngineVersion = if ($mpStatus.AMEngineVersion) { $mpStatus.AMEngineVersion } else { "Unknown" }
             
-            # Cloud/Telemetry settings
-            if ($mpStatus.PSObject.Properties.Name -contains 'MAPSReporting') {
-                $mapsValue = $mpStatus.MAPSReporting
-                $status.MDE.MAPSReporting = switch ($mapsValue) {
-                    0 { "Disabled" }
-                    1 { "Basic" }
-                    2 { "Advanced" }
-                    default { $mapsValue }
-                }
-            }
-            
-            if ($mpStatus.PSObject.Properties.Name -contains 'SubmitSamplesConsent') {
-                $samplesValue = $mpStatus.SubmitSamplesConsent
-                $status.MDE.SubmitSamplesConsent = switch ($samplesValue) {
-                    0 { "Always Prompt" }
-                    1 { "Send Safe Samples" }
-                    2 { "Never Send" }
-                    3 { "Send All Samples" }
-                    default { $samplesValue }
-                }
-            }
-            
-            # Signature freshness
+            # Signature freshness (from MpComputerStatus)
             if ($mpStatus.PSObject.Properties.Name -contains 'AntivirusSignatureLastUpdated') {
                 $status.MDE.SignatureUpdateLastChecked = $mpStatus.AntivirusSignatureLastUpdated
                 $signatureAge = (Get-Date) - $mpStatus.AntivirusSignatureLastUpdated
@@ -1255,6 +1165,53 @@ try {
             if ($mpStatus.PSObject.Properties.Name -contains 'OnboardingState') {
                 $onboardingState = $mpStatus.OnboardingState
             }
+        }
+    }
+    
+    # Get MAPS/Cloud Protection settings from MpPreference (not available in MpComputerStatus)
+    $mpPrefs = Get-MpPreference -ErrorAction SilentlyContinue
+    if ($mpPrefs) {
+        # Cloud-Delivered Protection (MAPS)
+        if ($mpPrefs.PSObject.Properties.Name -contains 'MAPSReporting') {
+            $mapsValue = $mpPrefs.MAPSReporting
+            $status.MDE.MAPSReporting = switch ($mapsValue) {
+                0 { "Disabled" }
+                1 { "Basic" }
+                2 { "Advanced" }
+                default { "Unknown ($mapsValue)" }
+            }
+        }
+        
+        # Sample Submission
+        if ($mpPrefs.PSObject.Properties.Name -contains 'SubmitSamplesConsent') {
+            $samplesValue = $mpPrefs.SubmitSamplesConsent
+            $status.MDE.SubmitSamplesConsent = switch ($samplesValue) {
+                0 { "Always Prompt" }
+                1 { "Send Safe Samples" }
+                2 { "Never Send" }
+                3 { "Send All Samples" }
+                default { "Unknown ($samplesValue)" }
+            }
+        }
+        
+        # Additional cloud protection settings
+        if ($mpPrefs.PSObject.Properties.Name -contains 'CloudBlockLevel') {
+            $status.MDE.CloudBlockLevel = switch ($mpPrefs.CloudBlockLevel) {
+                0 { "Default" }
+                1 { "Moderate" }
+                2 { "High" }
+                4 { "High+" }
+                6 { "Zero Tolerance" }
+                default { "Unknown ($($mpPrefs.CloudBlockLevel))" }
+            }
+        }
+        
+        if ($mpPrefs.PSObject.Properties.Name -contains 'CloudExtendedTimeout') {
+            $status.MDE.CloudExtendedTimeout = $mpPrefs.CloudExtendedTimeout
+        }
+        
+        if ($mpPrefs.PSObject.Properties.Name -contains 'DisableBlockAtFirstSeen') {
+            $status.MDE.BlockAtFirstSight = if ($mpPrefs.DisableBlockAtFirstSeen) { "Disabled" } else { "Enabled" }
         }
     }
 } catch { }
@@ -1305,6 +1262,50 @@ try {
             $lastConnectedDateTime = Convert-FileTimeToDateTime -FileTime $onboardingInfo.LastConnected
             if ($lastConnectedDateTime) {
                 $status.MDE.LastConnectedDateTime = $lastConnectedDateTime
+            }
+        }
+        
+        # Get CnC (Command and Control) settings - critical for MDE cloud communication
+        $status.MDE.CnC = @{
+            Enabled = $true  # Default
+            LastError = 0
+            TelemetryEnabled = $true
+            DeniedActions = 0
+            Status = "OK"
+            Issues = @()
+        }
+        
+        # Check if CnC is disabled
+        if ($onboardingInfo.PSObject.Properties.Name -contains 'disableCnC') {
+            if ($onboardingInfo.disableCnC -eq 1) {
+                $status.MDE.CnC.Enabled = $false
+                $status.MDE.CnC.Status = "DISABLED"
+                $status.MDE.CnC.Issues += "CnC is disabled - MDE cannot receive commands from cloud"
+            }
+        }
+        
+        # Check for CnC errors
+        if ($onboardingInfo.PSObject.Properties.Name -contains 'LastCncError') {
+            $status.MDE.CnC.LastError = $onboardingInfo.LastCncError
+            if ($onboardingInfo.LastCncError -ne 0) {
+                $status.MDE.CnC.Status = "ERROR"
+                $status.MDE.CnC.Issues += "LastCncError: $($onboardingInfo.LastCncError) - Cloud communication failed"
+            }
+        }
+        
+        # Check if telemetry is disabled
+        if ($onboardingInfo.PSObject.Properties.Name -contains 'disableCyberTelemetry') {
+            if ($onboardingInfo.disableCyberTelemetry -eq 1) {
+                $status.MDE.CnC.TelemetryEnabled = $false
+                $status.MDE.CnC.Issues += "CyberTelemetry is disabled - No security data sent to cloud"
+            }
+        }
+        
+        # Check for denied CnC actions
+        if ($onboardingInfo.PSObject.Properties.Name -contains 'deniedCnCActionsBitmask') {
+            $status.MDE.CnC.DeniedActions = $onboardingInfo.deniedCnCActionsBitmask
+            if ($onboardingInfo.deniedCnCActionsBitmask -ne 0) {
+                $status.MDE.CnC.Issues += "Some CnC actions are denied (bitmask: $($onboardingInfo.deniedCnCActionsBitmask))"
             }
         }
     } else {
@@ -2458,13 +2459,14 @@ $mdeEndpoints += @(
     
 foreach ($endpoint in $mdeEndpoints) {
         try {
-            # Build URL without explicit port (let the protocol determine the port)
+            # Build URL for display
             $testUrl = "https://$($endpoint.URL)"
             if ($endpoint.Port -eq 80) {
                 $testUrl = "http://$($endpoint.URL)"
             }
             
-            $testResult = Test-ConnectivityWithProxy -Url $testUrl -UseProxyMethod $UseProxy -TimeoutSeconds 10 -ProxyCredential $ProxyCredential
+            # Use DNS + TCP test (more accurate for MDE endpoints that don't respond to HTTP GET/HEAD)
+            $testResult = Test-EndpointConnectivity -Hostname $endpoint.URL -Port $endpoint.Port -TimeoutMs 5000
             
             $status.ConnectivityChecks += @{
                 URL = $testUrl
@@ -2472,7 +2474,10 @@ foreach ($endpoint in $mdeEndpoints) {
                 Category = $endpoint.Category
                 Description = $endpoint.Description
                 Mandatory = $endpoint.Mandatory
-                TestMethod = $testResult.Method
+                TestMethod = "DNS+TCP"
+                IPAddress = $testResult.IPAddress
+                DnsResolved = $testResult.DnsResolved
+                TcpConnected = $testResult.TcpConnected
             }
         } catch {
             # Build URL without explicit port for error case as well
@@ -2494,9 +2499,139 @@ foreach ($endpoint in $mdeEndpoints) {
     }
 
 # ========== REPORT ALL STATUS ==========
+
+# ========== QUICK STATUS DASHBOARD ==========
+# Calculate summary status indicators
+$dashArc = if ($SkipArc) { "SKIP" } elseif ($status.ArcAgent.Installed -and $status.ArcAgent.Status -match "Connected") { "OK" } elseif ($status.ArcAgent.Installed) { "WARN" } else { "FAIL" }
+$dashMDE = if ($status.MDE.OnboardingState -eq "Onboarded") { "OK" } elseif ($status.MDE.OnboardingState -match "Onboarded Locally") { "WARN" } else { "FAIL" }
+$dashCloud = if ($status.MDE.LastConnected -and $status.MDE.LastConnected -ne "0" -and $status.MDE.LastConnected -ne 0) { "OK" } else { "FAIL" }
+$dashSense = if ($status.MDE.SenseService -eq "Running") { "OK" } else { "FAIL" }
+$dashOrgId = if ($status.MDE.OrgId -eq $ExpectedOrgId) { "OK" } elseif ($status.MDE.OrgId -and $status.MDE.OrgId -ne "Not Available") { "MISMATCH" } else { "N/A" }
+
+# Count connectivity failures
+$arcConnFailed = @($status.ConnectivityChecks | Where-Object { $_.Category -eq "Azure Arc" -and $_.Status -eq "Failed" }).Count
+$mdeConnFailed = @($status.ConnectivityChecks | Where-Object { ($_.Category -eq "MDE" -or $_.Category -eq "MDE.Windows") -and $_.Status -eq "Failed" -and $_.Mandatory -eq $true }).Count
+$dashConn = if ($arcConnFailed -eq 0 -and $mdeConnFailed -eq 0) { "OK" } elseif ($mdeConnFailed -gt 0) { "FAIL" } else { "WARN" }
+
 Write-Host ""
+Write-Host "╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║              QUICK STATUS DASHBOARD                              ║" -ForegroundColor Cyan
+Write-Host "╠══════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+Write-Host "║  Server: $($env:COMPUTERNAME.PadRight(20)) Region: $($Region.PadRight(12)) Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm') ║" -ForegroundColor Cyan
+Write-Host "╠══════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+
+# Dashboard row helper function
+function Write-DashRow { param($Label, $Status, $Extra)
+    $icon = switch ($Status) { "OK" { "[✓]"; } "WARN" { "[!]"; } "FAIL" { "[✗]"; } "SKIP" { "[-]"; } "MISMATCH" { "[≠]"; } default { "[?]"; } }
+    $color = switch ($Status) { "OK" { "Green"; } "WARN" { "Yellow"; } "FAIL" { "Red"; } "SKIP" { "Gray"; } "MISMATCH" { "Red"; } default { "Gray"; } }
+    $extraText = if ($Extra) { " - $Extra" } else { "" }
+    Write-Host "║  " -NoNewline -ForegroundColor Cyan
+    Write-Host "$icon " -NoNewline -ForegroundColor $color
+    Write-Host "$($Label.PadRight(25))" -NoNewline -ForegroundColor White
+    Write-Host "$($Status.PadRight(10))" -NoNewline -ForegroundColor $color
+    Write-Host "$($extraText.PadRight(24))" -NoNewline -ForegroundColor Gray
+    Write-Host " ║" -ForegroundColor Cyan
+}
+
+Write-DashRow "Azure Arc Agent" $dashArc $(if ($dashArc -eq "OK") { $status.ArcAgent.Status } elseif ($dashArc -eq "SKIP") { "Validation skipped" } else { "Check required" })
+Write-DashRow "MDE Onboarding" $dashMDE $(if ($dashMDE -eq "OK") { "Onboarded" } else { $status.MDE.OnboardingState })
+Write-DashRow "MDE Cloud Connection" $dashCloud $(if ($dashCloud -eq "OK") { "Connected" } else { "Never connected" })
+Write-DashRow "Sense Service" $dashSense $status.MDE.SenseService
+Write-DashRow "Organization ID" $dashOrgId $(if ($dashOrgId -eq "OK") { "Matches expected" } elseif ($dashOrgId -eq "MISMATCH") { "Wrong tenant!" } else { "Not available" })
+Write-DashRow "Network Connectivity" $dashConn $(if ($dashConn -eq "OK") { "All endpoints OK" } else { "$mdeConnFailed MDE / $arcConnFailed Arc failed" })
+
+Write-Host "╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+
+# Calculate overall health
+$criticalIssues = 0
+if ($dashArc -eq "FAIL" -and -not $SkipArc) { $criticalIssues++ }
+if ($dashMDE -eq "FAIL") { $criticalIssues++ }
+if ($dashCloud -eq "FAIL" -and $dashMDE -ne "FAIL") { $criticalIssues++ }
+if ($dashSense -eq "FAIL") { $criticalIssues++ }
+if ($dashOrgId -eq "MISMATCH") { $criticalIssues++ }
+if ($dashConn -eq "FAIL") { $criticalIssues++ }
+
+if ($criticalIssues -eq 0) {
+    Write-Host "  ✅ OVERALL STATUS: HEALTHY - All critical checks passed" -ForegroundColor Green
+} elseif ($criticalIssues -le 2) {
+    Write-Host "  ⚠️  OVERALL STATUS: DEGRADED - $criticalIssues issue(s) need attention" -ForegroundColor Yellow
+} else {
+    Write-Host "  ❌ OVERALL STATUS: CRITICAL - $criticalIssues issue(s) require immediate action" -ForegroundColor Red
+}
+Write-Host ""
+
+# If Summary mode, show condensed output and exit early
+if ($Summary) {
+    Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "  SUMMARY MODE - Key Details" -ForegroundColor Cyan
+    Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # System Info (condensed)
+    Write-Host "  System: $($status.OperatingSystem.Caption) (Build $($status.OperatingSystem.BuildNumber))" -ForegroundColor Gray
+    if ($status.SystemDrive.FreeSpaceGB) {
+        $diskColor = if ($status.SystemDrive.FreeSpaceGB -lt 5) { "Red" } elseif ($status.SystemDrive.FreeSpaceGB -lt 10) { "Yellow" } else { "Gray" }
+        Write-Host "  Disk:   $($status.SystemDrive.FreeSpaceGB) GB free ($($status.SystemDrive.FreeSpacePercent)%)" -ForegroundColor $diskColor
+    }
+    Write-Host ""
+    
+    # MDE Details (condensed)
+    Write-Host "  MDE Platform:     $($status.MDE.PlatformVersion)" -ForegroundColor $(if ($status.MDE.VersionStatus -eq "Current") { "Green" } else { "Yellow" })
+    Write-Host "  MDE Engine:       $($status.MDE.EngineVersion)" -ForegroundColor Gray
+    Write-Host "  Real-Time Prot:   $($status.MDE.RealTimeProtection)" -ForegroundColor $(if ($status.MDE.RealTimeProtection -eq "Enabled") { "Green" } else { "Red" })
+    Write-Host "  Signatures:       $($status.MDE.AntivirusSignatureAge)" -ForegroundColor $(if ($status.MDE.DefenderSignaturesOutOfDate -eq "No") { "Green" } else { "Yellow" })
+    if ($status.MDE.OrgId -and $status.MDE.OrgId -ne "Not Available") {
+        Write-Host "  Organization ID:  $($status.MDE.OrgId)" -ForegroundColor $(if ($status.MDE.OrgId -eq $ExpectedOrgId) { "Green" } else { "Red" })
+    }
+    Write-Host ""
+    
+    # Show issues if any
+    if ($criticalIssues -gt 0) {
+        Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Yellow
+        Write-Host "  ISSUES DETECTED - Run without -Summary for full details" -ForegroundColor Yellow
+        Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Yellow
+        Write-Host ""
+        
+        if ($dashArc -eq "FAIL" -and -not $SkipArc) {
+            Write-Host "  [✗] Arc Agent: Not installed or not connected" -ForegroundColor Red
+            Write-Host "      → Install/reconnect Azure Arc agent" -ForegroundColor Yellow
+        }
+        if ($dashMDE -eq "FAIL") {
+            Write-Host "  [✗] MDE: Not onboarded" -ForegroundColor Red
+            Write-Host "      → Run onboarding script or deploy Arc extension" -ForegroundColor Yellow
+        }
+        if ($dashCloud -eq "FAIL" -and $dashMDE -ne "FAIL") {
+            Write-Host "  [✗] Cloud Connection: MDE has never connected to Microsoft cloud" -ForegroundColor Red
+            Write-Host "      → Check firewall rules for winatp-gw-*.microsoft.com" -ForegroundColor Yellow
+        }
+        if ($dashSense -eq "FAIL") {
+            Write-Host "  [✗] Sense Service: Not running" -ForegroundColor Red
+            Write-Host "      → Run: Start-Service Sense" -ForegroundColor Yellow
+        }
+        if ($dashOrgId -eq "MISMATCH") {
+            Write-Host "  [✗] Organization ID: Wrong tenant ($($status.MDE.OrgId))" -ForegroundColor Red
+            Write-Host "      → Re-onboard to correct tenant: $ExpectedOrgId" -ForegroundColor Yellow
+        }
+        if ($mdeConnFailed -gt 0) {
+            Write-Host "  [✗] Connectivity: $mdeConnFailed mandatory MDE endpoint(s) blocked" -ForegroundColor Red
+            Write-Host "      → Update firewall rules (see full report for URLs)" -ForegroundColor Yellow
+        }
+        Write-Host ""
+    }
+    
+    Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "  Run without -Summary for detailed diagnostics and remediation steps" -ForegroundColor Cyan
+    Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Exit early in summary mode
+    return
+}
+
+# Continue with detailed output (non-Summary mode)
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "         STATUS REPORT SUMMARY          " -ForegroundColor Cyan
+Write-Host "         DETAILED STATUS REPORT         " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -2714,6 +2849,7 @@ $mdeHealthChecks = @{
     NetworkProtectionOn = $false
     TelemetryEnabled = $false
     GatewayReachable = $false
+    CncWorking = $false
 }
 
 $mdeIssues = @()
@@ -2817,6 +2953,25 @@ if ($mdeGatewayPassed.Count -gt 0) {
     $mdeIssues += "MDE gateway endpoints not reachable"
 }
 
+# Check 12: CnC (Command and Control) Status
+if ($status.MDE.CnC) {
+    if ($status.MDE.CnC.Enabled -eq $true -and $status.MDE.CnC.LastError -eq 0) {
+        $mdeHealthChecks.CncWorking = $true
+    } else {
+        if ($status.MDE.CnC.Enabled -eq $false) {
+            $mdeIssues += "CnC (Command & Control) is disabled - MDE cannot receive policies from cloud"
+        }
+        if ($status.MDE.CnC.LastError -ne 0) {
+            $mdeIssues += "CnC has error code $($status.MDE.CnC.LastError) - check cloud communication"
+        }
+    }
+    if ($status.MDE.CnC.TelemetryEnabled -eq $false) {
+        $mdeIssues += "CyberTelemetry is disabled - security data not being sent to cloud"
+    }
+} else {
+    $mdeHealthChecks.CncWorking = $true  # Assume working if not readable (avoid false positives)
+}
+
 # Calculate health score
 $totalChecks = $mdeHealthChecks.Keys.Count
 $passedChecks = ($mdeHealthChecks.Values | Where-Object { $_ -eq $true }).Count
@@ -2850,6 +3005,7 @@ Write-Host "     [$(if ($mdeHealthChecks.BehaviorMonitorOn) {'✓'} else {'✗'}
 Write-Host "     [$(if ($mdeHealthChecks.NetworkProtectionOn) {'✓'} else {'i'})] Network Inspection Enabled" -ForegroundColor $(if ($mdeHealthChecks.NetworkProtectionOn) {"Green"} else {"Gray"})
 Write-Host "     [$(if ($mdeHealthChecks.TelemetryEnabled) {'✓'} else {'✗'})] Telemetry Enabled" -ForegroundColor $(if ($mdeHealthChecks.TelemetryEnabled) {"Green"} else {"Yellow"})
 Write-Host "     [$(if ($mdeHealthChecks.GatewayReachable) {'✓'} else {'✗'})] Gateway Connectivity Working" -ForegroundColor $(if ($mdeHealthChecks.GatewayReachable) {"Green"} else {"Red"})
+Write-Host "     [$(if ($mdeHealthChecks.CncWorking) {'✓'} else {'✗'})] CnC (Command & Control) Working" -ForegroundColor $(if ($mdeHealthChecks.CncWorking) {"Green"} else {"Red"})
 Write-Host ""
 
 # Show detailed metrics
@@ -2860,6 +3016,30 @@ if ($status.MDE.MAPSReporting -ne "Unknown") {
 if ($status.MDE.SubmitSamplesConsent -ne "Unknown") {
     Write-Host "     Sample Submission: $($status.MDE.SubmitSamplesConsent)" -ForegroundColor Gray
 }
+if ($status.MDE.CloudBlockLevel) {
+    Write-Host "     Cloud Block Level: $($status.MDE.CloudBlockLevel)" -ForegroundColor Gray
+}
+if ($status.MDE.BlockAtFirstSight) {
+    Write-Host "     Block at First Sight: $($status.MDE.BlockAtFirstSight)" -ForegroundColor $(if ($status.MDE.BlockAtFirstSight -eq "Enabled") {"Green"} else {"Yellow"})
+}
+
+# CnC (Command and Control) Status
+if ($status.MDE.CnC) {
+    $cncColor = if ($status.MDE.CnC.Status -eq "OK") { "Green" } elseif ($status.MDE.CnC.Status -eq "DISABLED") { "Red" } else { "Yellow" }
+    Write-Host "     CnC Status:       $($status.MDE.CnC.Status)" -ForegroundColor $cncColor
+    if ($status.MDE.CnC.LastError -ne 0) {
+        Write-Host "     LastCncError:     $($status.MDE.CnC.LastError)" -ForegroundColor Red
+    }
+    if (-not $status.MDE.CnC.TelemetryEnabled) {
+        Write-Host "     CyberTelemetry:   DISABLED" -ForegroundColor Red
+    }
+    if ($status.MDE.CnC.Issues.Count -gt 0) {
+        foreach ($cncIssue in $status.MDE.CnC.Issues) {
+            $mdeIssues += $cncIssue
+        }
+    }
+}
+
 if ($status.MDE.SignatureUpdateLastChecked) {
     Write-Host "     Last Sig Update:  $($status.MDE.SignatureUpdateLastChecked)" -ForegroundColor $(if ($mdeHealthChecks.SignaturesFresh) {"Green"} else {"Yellow"})
 }
@@ -2879,215 +3059,26 @@ if ($mdeIssues.Count -gt 0) {
     }
     Write-Host ""
     
-    # Provide actionable fixes
-    Write-Host "   Recommended Actions to Fix Issues:" -ForegroundColor Cyan
-    Write-Host "   ─────────────────────────────────────" -ForegroundColor Cyan
-    
-    # Action 1: Service not running
+    # Condensed remediation (show only for relevant issues)
+    Write-Host "   Quick Fixes:" -ForegroundColor Cyan
     if (-not $mdeHealthChecks.ServiceRunning) {
-        Write-Host ""
-        Write-Host "   [1] Fix: Sense Service Not Running" -ForegroundColor Yellow
-        Write-Host "       Command: Restart-Service Sense -Force" -ForegroundColor White
-        Write-Host "       Verify:  Get-Service Sense | Select-Object Status, StartType" -ForegroundColor Gray
+        Write-Host "     → Restart-Service Sense -Force" -ForegroundColor White
     }
-    
-    # Action 2: Process not running
-    if (-not $mdeHealthChecks.ProcessRunning -and $mdeHealthChecks.ServiceRunning) {
-        Write-Host ""
-        Write-Host "   [2] Fix: MsSense Process Not Running (Service is running)" -ForegroundColor Yellow
-        Write-Host "       This indicates a process crash or startup failure" -ForegroundColor Gray
-        Write-Host "       Command: Restart-Service Sense -Force" -ForegroundColor White
-        Write-Host "       Check Logs: Get-WinEvent -LogName 'Microsoft-Windows-SENSE/Operational' -MaxEvents 20" -ForegroundColor Gray
-    }
-    
-    # Action 3: Not onboarded
     if (-not $mdeHealthChecks.Onboarded) {
-        Write-Host ""
-        Write-Host "   [3] Fix: MDE Not Onboarded" -ForegroundColor Yellow
-        Write-Host "       Action: Device needs to be onboarded to Microsoft Defender for Endpoint" -ForegroundColor Gray
-        Write-Host "       1. Obtain onboarding package from security.microsoft.com" -ForegroundColor White
-        Write-Host "       2. Run: WindowsDefenderATPOnboardingScript.cmd" -ForegroundColor White
-        Write-Host "       3. Restart service: Restart-Service Sense -Force" -ForegroundColor White
+        Write-Host "     → Run MDE onboarding: WindowsDefenderATPOnboardingScript.cmd" -ForegroundColor White
     }
-    
-    # Action 4: No cloud connection
     if (-not $mdeHealthChecks.CloudConnected -and $mdeHealthChecks.Onboarded) {
-        Write-Host ""
-        Write-Host "   [4] Fix: No Cloud Connection (LastConnected Missing)" -ForegroundColor Yellow
-        Write-Host "       Root Cause: Firewall blocking MDE endpoints" -ForegroundColor Gray
-        Write-Host "       Required Firewall Rules (for $Region region):" -ForegroundColor White
-        
-        # Region-specific gateway URLs
-        switch ($Region) {
-            "Australia" {
-                Write-Host "       • https://winatp-gw-aus.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-aue.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-auc.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://au-v20.events.data.microsoft.com:443" -ForegroundColor Cyan
-            }
-            "US" {
-                Write-Host "       • https://winatp-gw-us.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-use.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-usw.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://us-v20.events.data.microsoft.com:443" -ForegroundColor Cyan
-            }
-            "Europe" {
-                Write-Host "       • https://winatp-gw-neu.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-weu.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-euc.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://eu-v20.events.data.microsoft.com:443" -ForegroundColor Cyan
-            }
-            "UK" {
-                Write-Host "       • https://winatp-gw-uks.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-ukw.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-ukc.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://uk-v20.events.data.microsoft.com:443" -ForegroundColor Cyan
-            }
-            "Canada" {
-                Write-Host "       • https://winatp-gw-cac.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-cae.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-caw.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://us-v20.events.data.microsoft.com:443" -ForegroundColor Cyan
-            }
-            "Asia" {
-                Write-Host "       • https://winatp-gw-seas.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-eas.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-seas2.microsoft.com:443" -ForegroundColor Cyan
-                Write-Host "       • https://seas-v20.events.data.microsoft.com:443" -ForegroundColor Cyan
-            }
-        }
-        Write-Host "       • https://events.data.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "       After firewall fix:" -ForegroundColor White
-        Write-Host "       1. Restart-Service Sense -Force" -ForegroundColor White
-        Write-Host "       2. Wait 5-10 minutes for connection" -ForegroundColor Gray
-        Write-Host "       3. Verify: Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' | Select-Object LastConnected" -ForegroundColor White
+        Write-Host "     → Check firewall: winatp-gw-*.microsoft.com:443, events.data.microsoft.com:443" -ForegroundColor White
     }
-    
-    # Action 5: Signatures outdated
     if (-not $mdeHealthChecks.SignaturesFresh) {
-        Write-Host ""
-        Write-Host "   [5] Fix: Signatures Outdated" -ForegroundColor Yellow
-        if (-not $mdeHealthChecks.CloudConnected) {
-            Write-Host "       Root Cause: No cloud connection - fix connectivity first" -ForegroundColor Red
-        } elseif (-not $mdeHealthChecks.GatewayReachable) {
-            Write-Host "       Root Cause: Update endpoints blocked by firewall" -ForegroundColor Red
-            Write-Host "       Required URLs:" -ForegroundColor White
-            Write-Host "       • https://definitionupdates.microsoft.com:443" -ForegroundColor Cyan
-            Write-Host "       • https://go.microsoft.com:443" -ForegroundColor Cyan
-            Write-Host "       • https://x.cp.wd.microsoft.com:443" -ForegroundColor Cyan
-        } else {
-            Write-Host "       Manual Update Command:" -ForegroundColor White
-            Write-Host "       Update-MpSignature -UpdateSource MicrosoftUpdateServer" -ForegroundColor White
-            Write-Host "       Verify: Get-MpComputerStatus | Select-Object AntivirusSignatureLastUpdated" -ForegroundColor Gray
-        }
+        Write-Host "     → Update-MpSignature -UpdateSource MicrosoftUpdateServer" -ForegroundColor White
     }
-    
-    # Action 6: Real-time protection disabled
     if (-not $mdeHealthChecks.RealTimeProtectionOn) {
-        Write-Host ""
-        Write-Host "   [6] Fix: Real-Time Protection Disabled" -ForegroundColor Yellow
-        Write-Host "       Enable Command:" -ForegroundColor White
-        Write-Host "       Set-MpPreference -DisableRealtimeMonitoring `$false" -ForegroundColor White
-        Write-Host "       Verify: Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled" -ForegroundColor Gray
-        Write-Host "       Note: Group Policy may override this setting" -ForegroundColor Yellow
+        Write-Host "     → Set-MpPreference -DisableRealtimeMonitoring `$false" -ForegroundColor White
     }
-    
-    # Action 7: Cloud protection disabled (skip if streamlined is working)
-    if (-not $mdeHealthChecks.CloudProtectionOn -and -not $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional) {
-        Write-Host ""
-        Write-Host "   [7] Fix: Cloud-Delivered Protection Disabled" -ForegroundColor Yellow
-        Write-Host "       Enable MAPS Reporting:" -ForegroundColor White
-        Write-Host "       Set-MpPreference -MAPSReporting Advanced" -ForegroundColor White
-        Write-Host "       Verify: Get-MpComputerStatus | Select-Object MAPSReporting" -ForegroundColor Gray
-        Write-Host "       Note: Requires network connectivity to Microsoft cloud" -ForegroundColor Yellow
-    } elseif (-not $mdeHealthChecks.CloudProtectionOn -and $status.MDE.StreamlinedConnectivity.CurrentlyUsing.Functional) {
-        Write-Host ""
-        Write-Host "   [INFO] MAPS Not Configured (Optional with Streamlined Connectivity)" -ForegroundColor Cyan
-        Write-Host "         MDE cloud protection is working via streamlined connectivity" -ForegroundColor Gray
-        Write-Host "         MAPS is a Windows Defender AV feature, not required for MDE EDR" -ForegroundColor Gray
-        Write-Host "         Optional: Enable for additional AV cloud features" -ForegroundColor Gray
-        Write-Host "         Set-MpPreference -MAPSReporting Advanced" -ForegroundColor DarkGray
-    }
-    
-    # Action 8: Behavior monitoring disabled
-    if (-not $mdeHealthChecks.BehaviorMonitorOn) {
-        Write-Host ""
-        Write-Host "   [8] Fix: Behavior Monitoring Disabled" -ForegroundColor Yellow
-        Write-Host "       Enable Command:" -ForegroundColor White
-        Write-Host "       Set-MpPreference -DisableBehaviorMonitoring `$false" -ForegroundColor White
-        Write-Host "       Verify: Get-MpComputerStatus | Select-Object BehaviorMonitorEnabled" -ForegroundColor Gray
-    }
-    
-    # Action 9: Gateway not reachable
     if (-not $mdeHealthChecks.GatewayReachable) {
-        Write-Host ""
-        Write-Host "   [9] Fix: MDE Gateway Endpoints Not Reachable" -ForegroundColor Yellow
-        Write-Host "       Root Cause: Firewall blocking MDE cloud communication" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "       Required Firewall Configuration:" -ForegroundColor White
-        Write-Host "       Add these URLs to firewall/proxy allowlist:" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "       CRITICAL - MDE Gateways ($Region region):" -ForegroundColor Yellow
-        
-        $testGateway = ""
-        switch ($Region) {
-            "Australia" {
-                Write-Host "       • https://winatp-gw-aus.microsoft.com:443 (Primary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-aue.microsoft.com:443 (Secondary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-auc.microsoft.com:443 (Tertiary)" -ForegroundColor Cyan
-                $testGateway = "winatp-gw-aue.microsoft.com"
-            }
-            "US" {
-                Write-Host "       • https://winatp-gw-us.microsoft.com:443 (Primary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-use.microsoft.com:443 (Secondary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-usw.microsoft.com:443 (Tertiary)" -ForegroundColor Cyan
-                $testGateway = "winatp-gw-use.microsoft.com"
-            }
-            "Europe" {
-                Write-Host "       • https://winatp-gw-neu.microsoft.com:443 (Primary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-weu.microsoft.com:443 (Secondary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-euc.microsoft.com:443 (Tertiary)" -ForegroundColor Cyan
-                $testGateway = "winatp-gw-weu.microsoft.com"
-            }
-            "UK" {
-                Write-Host "       • https://winatp-gw-uks.microsoft.com:443 (Primary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-ukw.microsoft.com:443 (Secondary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-ukc.microsoft.com:443 (Tertiary)" -ForegroundColor Cyan
-                $testGateway = "winatp-gw-uks.microsoft.com"
-            }
-            "Canada" {
-                Write-Host "       • https://winatp-gw-cac.microsoft.com:443 (Primary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-cae.microsoft.com:443 (Secondary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-caw.microsoft.com:443 (Tertiary)" -ForegroundColor Cyan
-                $testGateway = "winatp-gw-cae.microsoft.com"
-            }
-            "Asia" {
-                Write-Host "       • https://winatp-gw-seas.microsoft.com:443 (Primary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-eas.microsoft.com:443 (Secondary)" -ForegroundColor Cyan
-                Write-Host "       • https://winatp-gw-seas2.microsoft.com:443 (Tertiary)" -ForegroundColor Cyan
-                $testGateway = "winatp-gw-seas.microsoft.com"
-            }
-        }
-        
-        Write-Host ""
-        Write-Host "       CRITICAL - Data Endpoints:" -ForegroundColor Yellow
-        Write-Host "       • https://events.data.microsoft.com:443" -ForegroundColor Cyan
-        switch ($Region) {
-            "Australia" { Write-Host "       • https://au-v20.events.data.microsoft.com:443" -ForegroundColor Cyan }
-            "US" { Write-Host "       • https://us-v20.events.data.microsoft.com:443" -ForegroundColor Cyan }
-            "Europe" { Write-Host "       • https://eu-v20.events.data.microsoft.com:443" -ForegroundColor Cyan }
-            "UK" { Write-Host "       • https://uk-v20.events.data.microsoft.com:443" -ForegroundColor Cyan }
-            "Canada" { Write-Host "       • https://us-v20.events.data.microsoft.com:443" -ForegroundColor Cyan }
-            "Asia" { Write-Host "       • https://seas-v20.events.data.microsoft.com:443" -ForegroundColor Cyan }
-        }
-        Write-Host ""
-        Write-Host "       Test Connectivity:" -ForegroundColor White
-        Write-Host "       Test-NetConnection -ComputerName $testGateway -Port 443" -ForegroundColor White
-        Write-Host ""
-        Write-Host "       After firewall fix: Restart-Service Sense -Force" -ForegroundColor White
+        Write-Host "     → Add firewall rules for: winatp-gw-*.microsoft.com:443" -ForegroundColor White
     }
-    
     Write-Host ""
 }
 
@@ -3101,58 +3092,37 @@ if ($healthPercentage -ge 90) {
 }
 Write-Host ""
 
-# Report 3.2: Additional MDE Onboarding Validation (Microsoft Documentation Checks)
-Write-Host "${mdeSectionNumber}.2 ADDITIONAL MDE ONBOARDING VALIDATION" -ForegroundColor Green
+# Report 3.2: Additional MDE Onboarding Validation (condensed)
+Write-Host "${mdeSectionNumber}.2 MDE PREREQUISITES CHECK" -ForegroundColor Green
 Write-Host "   ----------------------------------------"
 
-# DiagTrack Service Check
-Write-Host "   DiagTrack Service (Windows Diagnostic Data):" -ForegroundColor Cyan
-Write-Host "     Status:      $($status.MDE.DiagTrackService.Status)" -ForegroundColor $(if ($status.MDE.DiagTrackService.Status -eq "Running") {"Green"} else {"Yellow"})
-Write-Host "     Start Type:  $($status.MDE.DiagTrackService.StartType)" -ForegroundColor $(if ($status.MDE.DiagTrackService.StartType -eq "Automatic") {"Green"} else {"Yellow"})
-if ($status.MDE.DiagTrackService.Issue) {
-    Write-Host "     Issue:       $($status.MDE.DiagTrackService.Issue)" -ForegroundColor Yellow
-    Write-Host "     Action:      sc config diagtrack start=auto && sc start diagtrack" -ForegroundColor Gray
-}
-Write-Host ""
+# Condensed service/component status table
+$diagStatus = if ($status.MDE.DiagTrackService.Status -eq "Running") { "[✓]" } else { "[!]" }
+$diagColor = if ($status.MDE.DiagTrackService.Status -eq "Running") { "Green" } else { "Yellow" }
+$elamStatus = if ($status.MDE.ELAMDriver.DisableAntiSpyware -ne 1 -and $status.MDE.ELAMDriver.DisableAntiVirus -ne 1) { "[✓]" } else { "[✗]" }
+$elamColor = if ($status.MDE.ELAMDriver.DisableAntiSpyware -ne 1 -and $status.MDE.ELAMDriver.DisableAntiVirus -ne 1) { "Green" } else { "Red" }
+$fodStatus = if ($status.MDE.SenseFoD.Installed -eq "Yes") { "[✓]" } else { "[✗]" }
+$fodColor = if ($status.MDE.SenseFoD.Installed -eq "Yes") { "Green" } else { "Red" }
+$regStatus = if ($status.MDE.RegistryHealth.StatusKeyExists) { "[✓]" } else { "[✗]" }
+$regColor = if ($status.MDE.RegistryHealth.StatusKeyExists) { "Green" } else { "Red" }
 
-# ELAM Driver Check
-Write-Host "   Windows Defender ELAM Driver:" -ForegroundColor Cyan
-Write-Host "     DisableAntiSpyware: $($status.MDE.ELAMDriver.DisableAntiSpyware)" -ForegroundColor $(if ($status.MDE.ELAMDriver.DisableAntiSpyware -eq 1) {"Red"} else {"Green"})
-Write-Host "     DisableAntiVirus:   $($status.MDE.ELAMDriver.DisableAntiVirus)" -ForegroundColor $(if ($status.MDE.ELAMDriver.DisableAntiVirus -eq 1) {"Red"} else {"Green"})
-if ($status.MDE.ELAMDriver.Issue) {
-    Write-Host "     Issue:              $($status.MDE.ELAMDriver.Issue)" -ForegroundColor Red
-    Write-Host "     Action:             Remove DisableAntiSpyware and DisableAntiVirus policies" -ForegroundColor Gray
-}
-Write-Host ""
+Write-Host "   $diagStatus DiagTrack Service: $($status.MDE.DiagTrackService.Status)" -ForegroundColor $diagColor
+Write-Host "   $elamStatus ELAM Driver: $(if ($elamStatus -eq '[✓]') { 'Enabled' } else { 'Disabled by policy' })" -ForegroundColor $elamColor
+Write-Host "   $fodStatus SENSE FoD: $($status.MDE.SenseFoD.Installed)" -ForegroundColor $fodColor
+Write-Host "   $regStatus Registry Keys: $(if ($regStatus -eq '[✓]') { 'Present' } else { 'Missing' })" -ForegroundColor $regColor
 
-# Windows Defender Services
-Write-Host "   Windows Defender Core Services:" -ForegroundColor Cyan
-foreach ($svcName in $status.MDE.DefenderServices.Keys | Sort-Object) {
-    $svc = $status.MDE.DefenderServices[$svcName]
-    $statusColor = if ($svc.Status -eq "Running" -or $svc.StartType -match "Auto|Manual") {"Green"} else {"Yellow"}
-    Write-Host "     $($svcName.PadRight(12)): $($svc.Status)" -ForegroundColor $statusColor
-}
-Write-Host ""
+# Show Defender services in compact format
+$defenderSvcOK = ($status.MDE.DefenderServices.Values | Where-Object { $_.Status -eq "Running" }).Count
+$defenderSvcTotal = $status.MDE.DefenderServices.Count
+$defSvcStatus = if ($defenderSvcOK -ge 3) { "[✓]" } else { "[!]" }
+$defSvcColor = if ($defenderSvcOK -ge 3) { "Green" } else { "Yellow" }
+Write-Host "   $defSvcStatus Defender Services: $defenderSvcOK/$defenderSvcTotal running" -ForegroundColor $defSvcColor
 
-# SENSE FoD Check
-Write-Host "   SENSE Feature on Demand:" -ForegroundColor Cyan
-Write-Host "     Installed:   $($status.MDE.SenseFoD.Installed)" -ForegroundColor $(if ($status.MDE.SenseFoD.Installed -eq "Yes") {"Green"} elseif ($status.MDE.SenseFoD.Installed -eq "No") {"Red"} else {"Yellow"})
-if ($status.MDE.SenseFoD.Installed -eq "No") {
-    Write-Host "     Action:      Install SENSE FoD using:" -ForegroundColor Gray
-    Write-Host "                  Add-WindowsCapability -Online -Name Microsoft.Windows.Sense.Client~~~~" -ForegroundColor White
-}
-Write-Host ""
-
-# Registry Health
-Write-Host "   MDE Registry Health:" -ForegroundColor Cyan
-Write-Host "     Policy Key Exists:  $($status.MDE.RegistryHealth.PolicyKeyExists)" -ForegroundColor $(if ($status.MDE.RegistryHealth.PolicyKeyExists) {"Green"} else {"Red"})
-Write-Host "     Status Key Exists:  $($status.MDE.RegistryHealth.StatusKeyExists)" -ForegroundColor $(if ($status.MDE.RegistryHealth.StatusKeyExists) {"Green"} else {"Red"})
-if ($status.MDE.RegistryHealth.OnboardingStateValue -ne $null) {
-    Write-Host "     OnboardingState:    $($status.MDE.RegistryHealth.OnboardingStateValue)" -ForegroundColor $(if ($status.MDE.RegistryHealth.OnboardingStateValue -eq 1) {"Green"} else {"Red"})
-}
-if ($status.MDE.RegistryHealth.Issue) {
-    Write-Host "     Issue:              $($status.MDE.RegistryHealth.Issue)" -ForegroundColor Yellow
-}
+# Event log errors (condensed)
+$errCount = if ($status.MDE.EventLogErrors.RecentErrorCount -is [int]) { $status.MDE.EventLogErrors.RecentErrorCount } else { 0 }
+$errStatus = if ($errCount -eq 0) { "[✓]" } else { "[!]" }
+$errColor = if ($errCount -eq 0) { "Green" } else { "Yellow" }
+Write-Host "   $errStatus Event Log Errors (24h): $errCount" -ForegroundColor $errColor
 Write-Host ""
 
 # Event Log Errors
@@ -3346,27 +3316,9 @@ if ($streamlinedStatus.Supported) {
         Write-Host "     • Configure firewall for standard endpoints (winatp-gw-*.microsoft.com)" -ForegroundColor Gray
         Write-Host ""
     } else {
-        Write-Host "   Required Actions:" -ForegroundColor Yellow
-        Write-Host "     • Update OS/SENSE/Defender versions to meet minimum requirements" -ForegroundColor Gray
-        Write-Host "     • Continue using standard connectivity method until prerequisites are met" -ForegroundColor Gray
+        Write-Host "   → Update OS/SENSE/Defender versions to meet requirements" -ForegroundColor Gray
     }
 }
-
-Write-Host ""
-Write-Host "   Minimum Requirements (per Microsoft documentation):" -ForegroundColor Cyan
-Write-Host "     • OS: Windows 10 1809+, Windows 11, Windows Server 2019+" -ForegroundColor Gray
-Write-Host "     • KB Update: March 8, 2022 update or later for your OS version" -ForegroundColor Gray
-Write-Host "       - Windows 11: KB5011493" -ForegroundColor Gray
-Write-Host "       - Windows 10 22H2: KB5020953 (October 28, 2022)" -ForegroundColor Gray
-Write-Host "       - Windows 10 20H2/21H2: KB5011487" -ForegroundColor Gray
-Write-Host "       - Windows 10 19H2 (1909): KB5011485" -ForegroundColor Gray
-Write-Host "       - Windows 10 1809: KB5011503" -ForegroundColor Gray
-Write-Host "       - Windows Server 2022: KB5011497" -ForegroundColor Gray
-Write-Host "       - Windows Server 2019: KB5011503" -ForegroundColor Gray
-Write-Host "     • SENSE: Version 10.8040.* or higher (March 2022+)" -ForegroundColor Gray
-Write-Host "     • AM Client: Version 4.18.2211.5 or higher" -ForegroundColor Gray
-Write-Host "     • Engine: Version 1.1.19900.2 or higher" -ForegroundColor Gray
-Write-Host "     • Security Intelligence: Current and up-to-date" -ForegroundColor Gray
 Write-Host ""
 
 # ==================== ADDITIONAL CHECKS ====================
@@ -3670,225 +3622,80 @@ if ($status.ConnectivityChecks -and $status.ConnectivityChecks.Count -gt 0) {
 }
 Write-Host ""
 
-# Comprehensive Proxy Routing Analysis
+# Comprehensive Connectivity & Proxy Routing Analysis using Test-MDEConnectivity
 try {
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "   COMPREHENSIVE PROXY ROUTING ANALYSIS" -ForegroundColor Cyan
+    Write-Host "   COMPREHENSIVE CONNECTIVITY ANALYSIS" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Analyzing routing configuration for ALL tested endpoints..." -ForegroundColor Gray
-    Write-Host "This shows which proxy (if any) will be used for each URL" -ForegroundColor Gray
+    Write-Host "Running Test-MDEConnectivity.ps1 for detailed endpoint analysis..." -ForegroundColor Gray
+    Write-Host "Tests: DNS resolution, TCP:443 connectivity, HTTPS validation" -ForegroundColor Gray
+    Write-Host "Features: Proxy detection (6 modes), Private Link detection, Purpose descriptions" -ForegroundColor Gray
+    Write-Host "Coverage: MDE (29 WW + regional), Arc (12 WW + regional), Extensions (10 endpoints)" -ForegroundColor Gray
     Write-Host ""
 
-# Collect ALL endpoints from connectivity results
-$allEndpointsToAnalyze = @()
-
-# Add Arc endpoints (from azcmagent check if available)
-$arcEndpoints = @(
-    @{URL = "https://ae.his.arc.azure.com"; Name = "Azure Arc - HIS Australia East"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://gbl.his.arc.azure.com"; Name = "Azure Arc - HIS Global"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://agentserviceapi.guestconfiguration.azure.com"; Name = "Azure Arc - Guest Config API"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://australiaeast-gas.guestconfiguration.azure.com"; Name = "Azure Arc - Guest Config Australia East"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://login.microsoftonline.com"; Name = "Azure AD Login"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://management.azure.com"; Name = "Azure Management API"; Category = "Azure Arc"; Mandatory = $true},
-    @{URL = "https://pas.windows.net"; Name = "Azure PAS Service"; Category = "Azure Arc"; Mandatory = $true}
-)
-$allEndpointsToAnalyze += $arcEndpoints
-
-# Add MDE Extension endpoints
-$mdeExtensionEndpoints = @(
-    @{URL = "https://go.microsoft.com"; Name = "MDE Installer Download"; Category = "MDE Extension"; Mandatory = $true},
-    @{URL = "https://automatedirstrprdaue.blob.core.windows.net"; Name = "MDE Package Storage (AUE)"; Category = "MDE Extension"; Mandatory = $true},
-    @{URL = "https://automatedirstrprdaus.blob.core.windows.net"; Name = "MDE Package Storage (AUS)"; Category = "MDE Extension"; Mandatory = $true}
-)
-$allEndpointsToAnalyze += $mdeExtensionEndpoints
-
-# Add MDE Runtime endpoints (Mandatory)
-$mdeRuntimeMandatory = @(
-    @{URL = "https://winatp-gw-aus.microsoft.com"; Name = "MDE Gateway (AUS)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
-    @{URL = "https://winatp-gw-aue.microsoft.com"; Name = "MDE Gateway (AUE)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
-    @{URL = "https://winatp-gw-auc.microsoft.com"; Name = "MDE Gateway (AUC)"; Category = "MDE Runtime - Gateway"; Mandatory = $true},
-    @{URL = "https://edr-aue.au.endpoint.security.microsoft.com"; Name = "MDE EDR Australia Endpoint"; Category = "MDE Runtime - EDR"; Mandatory = $true},
-    @{URL = "https://au-v20.events.data.microsoft.com"; Name = "Cyber Data Australia"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
-    @{URL = "https://wdcp.microsoft.com"; Name = "Cloud-delivered Protection"; Category = "MDE Runtime - Protection"; Mandatory = $true},
-    @{URL = "https://wdcpalt.microsoft.com"; Name = "Cloud-delivered Protection (Alternate)"; Category = "MDE Runtime - Protection"; Mandatory = $true},
-    @{URL = "https://events.data.microsoft.com"; Name = "MDE Telemetry (Global)"; Category = "MDE Runtime - Telemetry"; Mandatory = $true},
-    @{URL = "https://x.cp.wd.microsoft.com"; Name = "MDE Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
-    @{URL = "https://cdn.x.cp.wd.microsoft.com"; Name = "MDE CDN Content Delivery"; Category = "MDE Runtime - Content"; Mandatory = $true},
-    @{URL = "https://definitionupdates.microsoft.com"; Name = "Definition Updates"; Category = "MDE Runtime - Updates"; Mandatory = $true}
-)
-$allEndpointsToAnalyze += $mdeRuntimeMandatory
-
-# Add MDE Runtime endpoints (Optional)
-$mdeRuntimeOptional = @(
-    @{URL = "https://ctldl.windowsupdate.com"; Name = "Certificate Trust List"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "https://win.vortex.data.microsoft.com"; Name = "Windows Telemetry"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "https://settings-win.data.microsoft.com"; Name = "Windows Settings"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "https://fe3.delivery.mp.microsoft.com"; Name = "Windows Update Delivery"; Category = "MDE Runtime - Optional"; Mandatory = $false},
-    @{URL = "http://crl.microsoft.com"; Name = "Certificate Revocation List"; Category = "MDE Runtime - Optional"; Mandatory = $false}
-)
-$allEndpointsToAnalyze += $mdeRuntimeOptional
-
-# Analyze routing for each endpoint
-$routingResults = @()
-foreach ($endpoint in $allEndpointsToAnalyze) {
-    $routeInfo = Get-ActualProxyForUrl -Url $endpoint.URL
-    $routingResults += [PSCustomObject]@{
-        Category = $endpoint.Category
-        Name = $endpoint.Name
-        URL = $endpoint.URL
-        Mandatory = $endpoint.Mandatory
-        UsesProxy = $routeInfo.UsesProxy
-        ProxyAddress = $routeInfo.ProxyAddress
-        ProxyHost = $routeInfo.ProxyHost
-        ProxyPort = $routeInfo.ProxyPort
-        RoutingMethod = $routeInfo.RoutingMethod
-    }
-}
-
-# Group by routing method
-$proxyGroups = $routingResults | Where-Object { $_.UsesProxy } | Group-Object ProxyAddress
-$directEndpoints = $routingResults | Where-Object { -not $_.UsesProxy }
-
-# Display results grouped by proxy
-Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║  ROUTING ANALYSIS BY PROXY SERVER                       ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
-
-$proxyIndex = 1
-foreach ($proxyGroup in $proxyGroups) {
-    Write-Host "[$proxyIndex] PROXY: $($proxyGroup.Name)" -ForegroundColor Yellow
-    Write-Host "    Endpoints using this proxy: $($proxyGroup.Count)" -ForegroundColor Gray
-    Write-Host ""
-    
-    # Group by category
-    $categories = $proxyGroup.Group | Group-Object Category | Sort-Object Name
-    foreach ($cat in $categories) {
-        Write-Host "    📁 $($cat.Name) ($($cat.Count) endpoints)" -ForegroundColor Cyan
-        foreach ($ep in $cat.Group | Sort-Object Name) {
-            $mandatoryTag = if ($ep.Mandatory) { "[MANDATORY]" } else { "[OPTIONAL]" }
-            $tagColor = if ($ep.Mandatory) { "Red" } else { "DarkGray" }
-            Write-Host "       🔀 $($ep.Name)" -ForegroundColor White
-            Write-Host "          URL: $($ep.URL)" -ForegroundColor DarkGray
-            Write-Host "          Type: $mandatoryTag" -ForegroundColor $tagColor
+    # Check if Test-MDEConnectivity.ps1 exists
+    $testMDEScript = Join-Path $PSScriptRoot "Test-MDEConnectivity.ps1"
+    if (-not (Test-Path $testMDEScript)) {
+        $testMDEScript = "C:\Tools\Test-MDEConnectivity.ps1"
+        if (-not (Test-Path $testMDEScript)) {
+            Write-Host "⚠️  Test-MDEConnectivity.ps1 not found in current directory or C:\Tools\" -ForegroundColor Yellow
+            Write-Host "   Skipping comprehensive connectivity analysis" -ForegroundColor Yellow
+            Write-Host "   Download from: [provide location]" -ForegroundColor Gray
+            Write-Host ""
         }
-        Write-Host ""
     }
-    $proxyIndex++
-}
 
-# Display direct connections
-if ($directEndpoints.Count -gt 0) {
-    Write-Host "[$proxyIndex] DIRECT CONNECTION (No Proxy)" -ForegroundColor Green
-    Write-Host "    Endpoints using direct connection: $($directEndpoints.Count)" -ForegroundColor Gray
-    Write-Host ""
-    
-    $categories = $directEndpoints | Group-Object Category | Sort-Object Name
-    foreach ($cat in $categories) {
-        Write-Host "    📁 $($cat.Name) ($($cat.Count) endpoints)" -ForegroundColor Cyan
-        foreach ($ep in $cat.Group | Sort-Object Name) {
-            $mandatoryTag = if ($ep.Mandatory) { "[MANDATORY]" } else { "[OPTIONAL]" }
-            $tagColor = if ($ep.Mandatory) { "Red" } else { "DarkGray" }
-            Write-Host "       ➡️  $($ep.Name)" -ForegroundColor White
-            Write-Host "          URL: $($ep.URL)" -ForegroundColor DarkGray
-            Write-Host "          Type: $mandatoryTag" -ForegroundColor $tagColor
+    if (Test-Path $testMDEScript) {
+        # Map Region parameter from ValidateArcMDE to Test-MDEConnectivity
+        $regionMap = @{
+            "Australia" = "AU"
+            "US" = "US"
+            "Europe" = "EU"
+            "UK" = "UK"
+            "Canada" = "CA"
+            "Asia" = "ASIA"
         }
+        $testRegion = $regionMap[$Region]
+        if (-not $testRegion) { $testRegion = "AU" }  # Default fallback
+
+        Write-Host "Testing Region: $Region ($testRegion)" -ForegroundColor Cyan
         Write-Host ""
+
+        # Build parameters for Test-MDEConnectivity
+        # Using 'Streamlined' model to test both Standard + Streamlined endpoints
+        $testParams = @{
+            Region = $testRegion
+            Model = 'Streamlined'
+        }
+
+        # Add proxy credential if provided
+        if ($ProxyCredential) {
+            $testParams['ProxyCredential'] = $ProxyCredential
+        }
+
+        # Run Test-MDEConnectivity and capture results
+        Write-Host "Executing: Test-MDEConnectivity.ps1 -Region $testRegion -Model Streamlined (includes both Standard + Streamlined endpoints)" -ForegroundColor Gray
+        Write-Host ""
+        
+        try {
+            # Execute the script and let it display its output directly
+            & $testMDEScript @testParams
+            
+            Write-Host ""
+            Write-Host "✓ Connectivity analysis completed" -ForegroundColor Green
+            Write-Host "  Results have been saved to CSV and JSON files in current directory" -ForegroundColor Gray
+            Write-Host ""
+        } catch {
+            Write-Host "⚠️  Error executing Test-MDEConnectivity.ps1: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "   Continuing with remaining checks..." -ForegroundColor Yellow
+            Write-Host ""
+        }
     }
-}
-
-# Summary statistics
-Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Yellow
-Write-Host "║  ROUTING SUMMARY                                         ║" -ForegroundColor Yellow
-Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Yellow
-Write-Host ""
-
-$totalEndpoints = $routingResults.Count
-$proxyEndpoints = ($routingResults | Where-Object { $_.UsesProxy }).Count
-$directEndpointsCount = ($routingResults | Where-Object { -not $_.UsesProxy }).Count
-$uniqueProxies = ($routingResults | Where-Object { $_.UsesProxy } | Select-Object -Unique ProxyAddress).Count
-
-Write-Host "   Total Endpoints Analyzed: $totalEndpoints" -ForegroundColor White
-Write-Host "   • Using Proxy:            $proxyEndpoints ($([math]::Round($proxyEndpoints/$totalEndpoints*100))%)" -ForegroundColor Cyan
-Write-Host "   • Using Direct:           $directEndpointsCount ($([math]::Round($directEndpointsCount/$totalEndpoints*100))%)" -ForegroundColor Green
-Write-Host "   • Unique Proxies Found:   $uniqueProxies" -ForegroundColor Yellow
-Write-Host ""
-
-# Detect specific scenarios
-$mandatoryViaProxy = ($routingResults | Where-Object { $_.Mandatory -and $_.UsesProxy }).Count
-$mandatoryDirect = ($routingResults | Where-Object { $_.Mandatory -and -not $_.UsesProxy }).Count
-
-if ($mandatoryViaProxy -gt 0 -and $mandatoryDirect -gt 0) {
-    Write-Host "   ⚠️  CRITICAL FINDING: Mixed Routing for MANDATORY Endpoints" -ForegroundColor Red
-    Write-Host "      • $mandatoryViaProxy mandatory endpoints use proxy" -ForegroundColor Yellow
-    Write-Host "      • $mandatoryDirect mandatory endpoints use direct connection" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "      IMPACT: If proxy requires authentication or blocks MDE traffic," -ForegroundColor Yellow
-    Write-Host "              endpoints routed through proxy will FAIL while direct" -ForegroundColor Yellow
-    Write-Host "              endpoints (like Arc Private Link) will work." -ForegroundColor Yellow
-    Write-Host ""
-}
-
-# Check if Arc uses direct but MDE uses proxy
-$arcDirect = ($routingResults | Where-Object { $_.Category -eq "Azure Arc" -and -not $_.UsesProxy }).Count
-$mdeViaProxy = ($routingResults | Where-Object { $_.Category -like "MDE*" -and $_.UsesProxy }).Count
-
-if ($arcDirect -gt 0 -and $mdeViaProxy -gt 0) {
-    Write-Host "   🎯 ARC vs MDE ROUTING DIFFERENCE DETECTED:" -ForegroundColor Red
-    Write-Host "      • Azure Arc: $arcDirect endpoints use DIRECT (Private Link)" -ForegroundColor Green
-    Write-Host "      • MDE:       $mdeViaProxy endpoints use PROXY" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "      EXPLANATION: Arc works because it bypasses proxy via Private Link" -ForegroundColor Yellow
-    Write-Host "                   MDE fails because proxy blocks/requires auth for MDE URLs" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "      SOLUTIONS:" -ForegroundColor Yellow
-    Write-Host "      1. Configure MDE to use Private Link (like Arc does)" -ForegroundColor White
-    Write-Host "      2. Fix proxy to allow MDE traffic (add authentication if needed)" -ForegroundColor White
-    Write-Host "      3. Add MDE URLs to proxy bypass list" -ForegroundColor White
-    Write-Host ""
-}
-
-# Check for multiple proxies (PAC file indicator)
-if ($uniqueProxies -gt 1) {
-    Write-Host "   🔍 MULTIPLE PROXIES DETECTED ($uniqueProxies different proxies)" -ForegroundColor Yellow
-    Write-Host "      This indicates PAC file or advanced proxy routing rules" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "      Proxies found:" -ForegroundColor Gray
-    foreach ($proxy in ($routingResults | Where-Object { $_.UsesProxy } | Select-Object -Unique ProxyAddress)) {
-        $count = ($routingResults | Where-Object { $_.ProxyAddress -eq $proxy.ProxyAddress }).Count
-        Write-Host "      • $($proxy.ProxyAddress) ($count endpoints)" -ForegroundColor Cyan
-    }
-    Write-Host ""
-    Write-Host "      ACTION: Verify ALL proxies allow MDE traffic" -ForegroundColor Yellow
-    Write-Host "              Check if any proxy requires authentication" -ForegroundColor Yellow
-    Write-Host ""
-}
-
-# Check if proxy detected but Get-ProxyConfiguration says "NOT DETECTED"
-if (-not $proxyConfig.ProxyEnabled -and $proxyEndpoints -gt 0) {
-    Write-Host "   ⚠️  PROXY DETECTION DISCREPANCY:" -ForegroundColor Red
-    Write-Host "      • Get-ProxyConfiguration: NOT DETECTED" -ForegroundColor Red
-    Write-Host "      • Actual routing analysis: $proxyEndpoints endpoints use proxy" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "      ROOT CAUSE: Proxy configured outside standard locations" -ForegroundColor Yellow
-    Write-Host "      Likely configured via:" -ForegroundColor Gray
-    Write-Host "      • PAC file (AutoConfigURL in IE settings)" -ForegroundColor Gray
-    Write-Host "      • WPAD via DHCP Option 252" -ForegroundColor Gray
-    Write-Host "      • WPAD via DNS (wpad.domain.com)" -ForegroundColor Gray
-    Write-Host "      • Browser-only proxy settings" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "      INVESTIGATION COMMANDS:" -ForegroundColor Yellow
-    Write-Host "      1. Check IE proxy: Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'" -ForegroundColor Cyan
-    Write-Host "      2. Check WPAD DNS: nslookup wpad" -ForegroundColor Cyan
-    Write-Host "      3. Check DHCP: ipconfig /all | Select-String 'DHCP'" -ForegroundColor Cyan
-    Write-Host "      4. Get PAC file: [System.Net.WebRequest]::DefaultWebProxy.GetProxy([Uri]'http://test.com')" -ForegroundColor Cyan
-    Write-Host ""
-}
 
 Write-Host ""
 } catch {
-    Write-Host "⚠️  Error during proxy routing analysis: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "⚠️  Error during connectivity analysis: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "   Details: $($_.ScriptStackTrace)" -ForegroundColor DarkGray
     Write-Host ""
 }
@@ -4014,38 +3821,18 @@ if ($status.ConnectivityChecks) {
     
     if ($failedMDEMandatory.Count -gt 0) {
         Write-Host "[CRITICAL] $($failedMDEMandatory.Count) MANDATORY MDE connectivity check(s) failed" -ForegroundColor Red
-        Write-Host "           Failed MANDATORY MDE endpoints:" -ForegroundColor Red
-        foreach ($failed in $failedMDEMandatory) {
-            $desc = if ($failed.Description) { " - $($failed.Description)" } else { "" }
-            Write-Host "           - $($failed.URL)$desc" -ForegroundColor Red
+        foreach ($failed in $failedMDEMandatory | Select-Object -First 5) {
+            Write-Host "  - $($failed.URL)" -ForegroundColor Red
         }
-        Write-Host "           Issue: Unable to reach critical MDE endpoints - MDE functionality degraded" -ForegroundColor Red
-        $impactMsg = if ($SkipArc) { "EDR protection degraded" } else { "Extension installation/updates may fail, EDR protection degraded" }
-        Write-Host "           Impact: $impactMsg" -ForegroundColor Red
-        Write-Host "           Root Cause: Network connectivity or firewall blocking MDE traffic" -ForegroundColor Red
-        Write-Host "           Action: Verify firewall allows access to MANDATORY MDE endpoints" -ForegroundColor Yellow
-        Write-Host "                   Required MDE URLs (see failed endpoints above for specifics):" -ForegroundColor Yellow
-        Write-Host "                   - *.blob.core.windows.net:443 (MDE Package Storage)" -ForegroundColor Gray
-        Write-Host "                   - go.microsoft.com:443 (MDE Installer)" -ForegroundColor Gray
-        Write-Host "                   - *.wd.microsoft.com:443 (Content Delivery)" -ForegroundColor Gray
-        Write-Host "                   - winatp-gw-*.microsoft.com:443 (Regional Gateways)" -ForegroundColor Gray
-        Write-Host "                   - edr-*.endpoint.security.microsoft.com:443 (EDR Endpoints)" -ForegroundColor Gray
-        Write-Host "                   - events.data.microsoft.com:443 (Telemetry)" -ForegroundColor Gray
-        Write-Host "                   Check DNS resolution: Resolve-DnsName <endpoint>" -ForegroundColor Yellow
-        Write-Host "                   Test connectivity: Test-NetConnection -ComputerName <endpoint> -Port 443" -ForegroundColor Yellow
+        if ($failedMDEMandatory.Count -gt 5) {
+            Write-Host "  ... and $($failedMDEMandatory.Count - 5) more" -ForegroundColor Red
+        }
+        Write-Host "  Action: Add firewall rules for winatp-gw-*.microsoft.com, events.data.microsoft.com" -ForegroundColor Yellow
         $issuesFound = $true
     }
     
     if ($failedMDEOptional.Count -gt 0) {
-        Write-Host "[INFO] $($failedMDEOptional.Count) OPTIONAL MDE connectivity check(s) failed" -ForegroundColor Yellow
-        Write-Host "       Failed OPTIONAL MDE endpoints (MDE will still function):" -ForegroundColor Yellow
-        foreach ($failed in $failedMDEOptional) {
-            $desc = if ($failed.Description) { " - $($failed.Description)" } else { "" }
-            Write-Host "       - $($failed.URL)$desc" -ForegroundColor Yellow
-        }
-        Write-Host "       Impact: Limited - Core MDE functionality not affected" -ForegroundColor Yellow
-        Write-Host "       Note: These endpoints provide enhanced features (Windows telemetry, CRL, etc.)" -ForegroundColor Gray
-        Write-Host "       Action: Optional - Fix only if enhanced features are required" -ForegroundColor Gray
+        Write-Host "[INFO] $($failedMDEOptional.Count) optional MDE endpoint(s) failed (non-critical)" -ForegroundColor Yellow
     }
 }
 
@@ -4117,164 +3904,23 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
     # Now check if portal recognizes it (depends on LastConnected)
     
     if (-not $status.MDE.LastConnected) {
-        # CRITICAL FINDING: This is THE reason portal shows "Can be onboarded"
         Write-Host "[CRITICAL] Portal Shows 'Can be onboarded' - Missing Cloud Connection" -ForegroundColor Red
+        Write-Host "  Registry: OnboardingState=1 (Onboarded) [✓] | LastConnected=NOT PRESENT [✗]" -ForegroundColor Red
         Write-Host ""
-        Write-Host "           ROOT CAUSE IDENTIFIED:" -ForegroundColor Yellow
-        Write-Host "           =====================" -ForegroundColor Yellow
-        Write-Host "           Registry OnboardingState: 1 (Onboarded) [✓]" -ForegroundColor Green
-        Write-Host "           Registry LastConnected: NOT PRESENT [✗]" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "           THE PROBLEM:" -ForegroundColor Red
-        Write-Host "           - MDE was onboarded locally (registry key set)" -ForegroundColor Gray
-        Write-Host "           - But agent has NEVER connected to Microsoft Defender cloud" -ForegroundColor Red
-        Write-Host "           - Portal cannot verify this device exists" -ForegroundColor Red
-        Write-Host "           - Therefore portal shows: 'Defender for Endpoint can be onboarded'" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "           Registry Location: HKLM:\\SOFTWARE\\Microsoft\\Windows Advanced Threat Protection\\Status" -ForegroundColor DarkGray
-        Write-Host ""
+        Write-Host "  Root Cause: Agent never connected to Microsoft Defender cloud" -ForegroundColor Yellow
+        Write-Host "  Sense Service: $($status.MDE.SenseService)" -ForegroundColor $(if ($status.MDE.SenseService -eq "Running") {"Green"} else {"Red"})
         
-        # Add version analysis as supporting evidence
         if ($status.MDE.VersionStatus -match "OUTDATED|CRITICALLY|Needs Update" -and $status.MDE.VersionAge -ne "Unknown") {
-            Write-Host "           SUPPORTING EVIDENCE - Outdated Agent Version:" -ForegroundColor Yellow
-            Write-Host "           - Platform: $($status.MDE.PlatformVersion)" -ForegroundColor Red
-            Write-Host "           - Age: $($status.MDE.VersionAge)" -ForegroundColor Red
-            Write-Host "           - Status: $($status.MDE.VersionStatus)" -ForegroundColor Red
-            Write-Host "           - Conclusion: Outdated version proves NO cloud connectivity" -ForegroundColor Red
-            Write-Host "             (Agent cannot get updates without connecting to Microsoft cloud)" -ForegroundColor Gray
-            Write-Host ""
+            Write-Host "  Agent: $($status.MDE.PlatformVersion) - $($status.MDE.VersionStatus) ($($status.MDE.VersionAge))" -ForegroundColor Red
         }
-        
-        Write-Host "           WHY THIS HAPPENED:" -ForegroundColor Yellow
-        Write-Host "           1. Firewall blocking MDE endpoints (see connectivity test results above)" -ForegroundColor Gray
-        if ($failedMDEConnectivity -and $failedMDEConnectivity.Count -gt 0) {
-            $failedUrls = ($failedMDEConnectivity | Select-Object -First 3 | ForEach-Object { $_.URL }) -join ', '
-            Write-Host "              Critical blocked: $failedUrls..." -ForegroundColor Red
-        }
-        Write-Host "           2. Service never started after onboarding, OR" -ForegroundColor Gray
-        Write-Host "           3. Onboarding configuration incomplete/corrupted" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "           CURRENT STATUS CHECK:" -ForegroundColor Cyan
-        Write-Host "           - Sense Service: $($status.MDE.SenseService)" -ForegroundColor $(if ($status.MDE.SenseService -eq "Running") {"Green"} else {"Red"})
-        Write-Host ""
-        Write-Host "           HOW TO FIX:" -ForegroundColor Yellow
-        Write-Host "           ===========" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "           Step 1: ADD FIREWALL RULES (CRITICAL - Root Cause!)" -ForegroundColor Red
-        Write-Host "           -----------------------------------------------" -ForegroundColor Red
-        Write-Host "           Whitelist these EXACT URLs in your firewall/proxy:" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "           CRITICAL - Minimum Required for Onboarding:" -ForegroundColor Yellow
-        
-        # Show region-specific critical endpoints
-        $regionGateways = $regionConfig[$Region].Gateways
-        foreach ($gateway in $regionGateways) {
-            Write-Host "           • https://winatp-gw-$gateway.microsoft.com:443" -ForegroundColor Cyan
-        }
-        Write-Host "           • https://events.data.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://$($regionConfig[$Region].CyberData):443" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "           IMPORTANT - Required for Updates/Operations:" -ForegroundColor Yellow
-        Write-Host "           • https://go.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://definitionupdates.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://x.cp.wd.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://wdcp.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://wdcpalt.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "           BLOB STORAGE - Region-specific for your deployment:" -ForegroundColor Yellow
-        foreach ($blob in $regionConfig[$Region].BlobStorage) {
-            Write-Host "           • https://automatedirstrprd$blob.blob.core.windows.net:443" -ForegroundColor Cyan
-        }
-        Write-Host ""
-        Write-Host "           OPTIONAL - Supporting Services:" -ForegroundColor Yellow
-        Write-Host "           • https://ctldl.windowsupdate.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://crl.microsoft.com:80" -ForegroundColor Cyan
-        Write-Host "           • https://win.vortex.data.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://settings-win.data.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host "           • https://fe3.delivery.mp.microsoft.com:443" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "           Firewall Rule Format Example:" -ForegroundColor DarkGray
-        Write-Host "           Allow Outbound: Protocol=HTTPS, Port=443, Destination=winatp-gw-*.microsoft.com" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host ""
-        Write-Host "           Step 2: RESTART MDE SERVICE" -ForegroundColor Yellow
-        Write-Host "           ---------------------------" -ForegroundColor Yellow
-        Write-Host "           After firewall rules are applied, restart the MDE service:" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "           Restart-Service Sense -Force" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "           This forces the agent to re-attempt cloud connection with new firewall rules" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host ""
-        Write-Host "           Step 3: WAIT FOR INITIAL CLOUD CONNECTION" -ForegroundColor Yellow
-        Write-Host "           -----------------------------------------" -ForegroundColor Yellow
-        Write-Host "           After firewall fix and service restart, wait 5-10 minutes for:" -ForegroundColor Gray
-        Write-Host "           - Agent to detect connectivity is restored" -ForegroundColor Gray
-        Write-Host "           - Connect to Microsoft Defender cloud" -ForegroundColor Gray
-        Write-Host "           - Establish device identity" -ForegroundColor Gray
-        Write-Host "           - Set LastConnected registry value" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host ""
-        Write-Host "           Step 4: VERIFY LastConnected VALUE (Automatic Check)" -ForegroundColor Yellow
-        Write-Host "           -----------------------------------------------------" -ForegroundColor Yellow
-        Write-Host "           Checking current LastConnected status..." -ForegroundColor Gray
         Write-Host ""
         
-        # Automatically check LastConnected status
-        try {
-            $lastConnectedCheck = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' -Name LastConnected -ErrorAction SilentlyContinue
-            
-            if ($lastConnectedCheck -and $lastConnectedCheck.LastConnected -and $lastConnectedCheck.LastConnected -ne 0) {
-                # Convert FILETIME to readable DateTime
-                $lastConnectedDateTime = Convert-FileTimeToDateTime -FileTime $lastConnectedCheck.LastConnected
-                
-                Write-Host "           ✅ SUCCESS: LastConnected value EXISTS" -ForegroundColor Green
-                if ($lastConnectedDateTime) {
-                    Write-Host "           Date/Time: $lastConnectedDateTime" -ForegroundColor Green
-                    Write-Host "           Raw Value: $($lastConnectedCheck.LastConnected)" -ForegroundColor DarkGray
-                } else {
-                    Write-Host "           Raw Value: $($lastConnectedCheck.LastConnected)" -ForegroundColor Green
-                }
-                Write-Host ""
-                Write-Host "           This means:" -ForegroundColor Cyan
-                Write-Host "           • MDE successfully connected to Microsoft cloud" -ForegroundColor Gray
-                Write-Host "           • Device identity established" -ForegroundColor Gray
-                Write-Host "           • Portal should recognize this device within 10-15 minutes" -ForegroundColor Gray
-                Write-Host ""
-                Write-Host "           Next Steps:" -ForegroundColor Yellow
-                Write-Host "           1. Wait 10-15 minutes for portal to sync" -ForegroundColor Gray
-                Write-Host "           2. Verify in Azure Portal → Defender for Cloud → Servers" -ForegroundColor Gray
-                Write-Host "           3. Look for server: $($env:COMPUTERNAME)" -ForegroundColor Cyan
-                Write-Host "           4. Status should show: 'Defender for Server: Onboarded'" -ForegroundColor Gray
-            } else {
-                Write-Host "           ❌ FAILURE: LastConnected value is MISSING" -ForegroundColor Red
-                Write-Host "           Registry: HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status" -ForegroundColor Gray
-                Write-Host ""
-                Write-Host "           This means MDE has NOT connected to Microsoft cloud yet" -ForegroundColor Red
-                Write-Host ""
-                Write-Host "           Troubleshooting steps:" -ForegroundColor Yellow
-                Write-Host "           • Wait 10 more minutes and run this script again" -ForegroundColor Gray
-                Write-Host "           • Verify firewall rules are applied correctly" -ForegroundColor Gray
-                Write-Host "           • Check DNS resolution: Resolve-DnsName winatp-gw-aue.microsoft.com" -ForegroundColor Gray
-                Write-Host "           • Test connectivity: Test-NetConnection -ComputerName winatp-gw-aue.microsoft.com -Port 443" -ForegroundColor Gray
-                Write-Host "           • Check MDE service is running: Get-Service Sense" -ForegroundColor Gray
-                Write-Host "           • Review SENSE event logs for connection errors:" -ForegroundColor Gray
-                Write-Host "             Get-WinEvent -LogName 'Microsoft-Windows-SENSE/Operational' -MaxEvents 20" -ForegroundColor Cyan
-            }
-        } catch {
-            Write-Host "           ⚠️  ERROR: Unable to check LastConnected value" -ForegroundColor Yellow
-            Write-Host "           Error: $($_.Exception.Message)" -ForegroundColor Red
-        }
-        
-        Write-Host ""
-        Write-Host ""
-        Write-Host "           Step 5: VERIFY IN AZURE PORTAL" -ForegroundColor Yellow
-        Write-Host "           ------------------------------" -ForegroundColor Yellow
-        Write-Host "           After LastConnected value appears, wait additional 10-15 minutes then:" -ForegroundColor Gray
-        Write-Host "           - Open Azure Portal → Defender for Cloud → Servers" -ForegroundColor Gray
-        Write-Host "           - Locate this server: $($env:COMPUTERNAME)" -ForegroundColor Cyan
-        Write-Host "           - Refresh the page (Ctrl+F5)" -ForegroundColor Gray
-        Write-Host "           - Verify status shows: 'Defender for Server: Onboarded' [OK]" -ForegroundColor Green
+        Write-Host "  TO FIX:" -ForegroundColor Yellow
+        Write-Host "  1. Add firewall rules for MDE endpoints (see connectivity failures above)" -ForegroundColor Gray
+        Write-Host "     Critical: winatp-gw-*.microsoft.com:443, events.data.microsoft.com:443" -ForegroundColor Cyan
+        Write-Host "  2. Restart MDE service: Restart-Service Sense -Force" -ForegroundColor Cyan
+        Write-Host "  3. Wait 5-10 minutes for cloud connection" -ForegroundColor Gray
+        Write-Host "  4. Re-run this script to verify LastConnected is set" -ForegroundColor Gray
         Write-Host ""
         $issuesFound = $true
         $portalShowsOnboarded = $false
@@ -4284,74 +3930,21 @@ if ($status.MDE.InstallPath -eq "Not Found" -or $status.MDE.SenseExeExists -eq "
         $portalShowsOnboarded = $true
         
         Write-Host "[SUCCESS] Portal Shows 'Onboarded' - Cloud Connection Established" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "          VERIFIED STATUS:" -ForegroundColor Green
-        Write-Host "          ===============" -ForegroundColor Green
-        Write-Host "          Registry OnboardingState: 1 (Onboarded) [OK]" -ForegroundColor Green
+        $lastConnectedDisplay = if ($status.MDE.LastConnectedDateTime) { $status.MDE.LastConnectedDateTime } else { $status.MDE.LastConnected }
+        Write-Host "  OnboardingState: 1 | LastConnected: $lastConnectedDisplay" -ForegroundColor Green
         
-        # Display LastConnected with readable DateTime
-        if ($status.MDE.LastConnected -and $status.MDE.LastConnected -ne "0" -and $status.MDE.LastConnected -ne 0) {
-            if ($status.MDE.LastConnectedDateTime) {
-                Write-Host "          Registry LastConnected: $($status.MDE.LastConnectedDateTime) [OK]" -ForegroundColor Green
-                Write-Host "                                  (Raw: $($status.MDE.LastConnected))" -ForegroundColor DarkGray
-            } else {
-                Write-Host "          Registry LastConnected: $($status.MDE.LastConnected) (Unable to convert) [WARNING]" -ForegroundColor Yellow
-            }
-        } else {
-            if ([string]::IsNullOrWhiteSpace($status.MDE.LastConnected)) {
-                Write-Host "          Registry LastConnected: MISSING [ERROR]" -ForegroundColor Red
-            } elseif ($status.MDE.LastConnected -eq "0" -or $status.MDE.LastConnected -eq 0) {
-                Write-Host "          Registry LastConnected: INVALID (0) [ERROR]" -ForegroundColor Red
-            } else {
-                Write-Host "          Registry LastConnected: ERROR ($($status.MDE.LastConnected)) [ERROR]" -ForegroundColor Red
-            }
-        }
-        
-        Write-Host "          Portal Status: 'Defender for Server: Onboarded' [OK]" -ForegroundColor Green
-        Write-Host ""
-        
-        # Show version status as evidence of cloud connectivity
         if ($status.MDE.VersionStatus -and $status.MDE.VersionStatus -ne "Unable to analyze") {
-            if ($status.MDE.VersionStatus -eq "Current") {
-                Write-Host "          Agent Version: $($status.MDE.PlatformVersion)" -ForegroundColor Green
-                Write-Host "          Version Status: $($status.MDE.VersionStatus) [OK]" -ForegroundColor Green
-                Write-Host "          (Agent successfully receiving updates from Microsoft cloud)" -ForegroundColor Cyan
-                Write-Host ""
-            } else {
-                Write-Host "          Agent Version: $($status.MDE.PlatformVersion) ($($status.MDE.VersionAge))" -ForegroundColor Yellow
-                Write-Host "          Version Status: $($status.MDE.VersionStatus)" -ForegroundColor Yellow
-                Write-Host "          Note: Agent connected to cloud before but may have connectivity issues now" -ForegroundColor Yellow
-                Write-Host ""
-            }
+            $verColor = if ($status.MDE.VersionStatus -eq "Current") { "Green" } else { "Yellow" }
+            Write-Host "  Agent: $($status.MDE.PlatformVersion) - $($status.MDE.VersionStatus)" -ForegroundColor $verColor
         }
         
-        # Even if connectivity is failing NOW, device is recognized because it connected before
         if ($failedMDEConnectivity -and $failedMDEConnectivity.Count -gt 0) {
-            Write-Host "          CONNECTIVITY WARNING:" -ForegroundColor Yellow
-            Write-Host "          =====================" -ForegroundColor Yellow
-            Write-Host "          Portal shows 'Onboarded' because:" -ForegroundColor Cyan
-            Write-Host "          - Device successfully connected to cloud IN THE PAST" -ForegroundColor Green
-            Write-Host "          - LastConnected registry value was set" -ForegroundColor Green
-            Write-Host "          - Portal verified device identity" -ForegroundColor Green
             Write-Host ""
-            Write-Host "          BUT currently has $($failedMDEConnectivity.Count) connectivity failures" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "          WHAT THIS MEANS:" -ForegroundColor Yellow
-            Write-Host "          - Firewall rules likely changed AFTER initial onboarding" -ForegroundColor Gray
-            Write-Host "          - Device is 'onboarded' but operating in degraded mode" -ForegroundColor Yellow
-            Write-Host ""
-            Write-Host "          CURRENT IMPACT:" -ForegroundColor Yellow
-            Write-Host "          - Real-time cloud protection queries may fail" -ForegroundColor Red
-            Write-Host "          - Telemetry submission blocked" -ForegroundColor Red
-            Write-Host "          - Agent cannot receive updates" -ForegroundColor Red
-            Write-Host "          - Security posture degraded" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "          RECOMMENDATION:" -ForegroundColor Yellow
-            Write-Host "          Fix firewall to restore full MDE functionality" -ForegroundColor Yellow
-            Write-Host "          See failed endpoints in connectivity test above" -ForegroundColor Gray
-            Write-Host "          Priority: winatp-gw-*.microsoft.com, events.data.microsoft.com" -ForegroundColor Cyan
-            Write-Host ""
+            Write-Host "  [WARNING] $($failedMDEConnectivity.Count) connectivity failures detected" -ForegroundColor Yellow
+            Write-Host "  Device is onboarded but operating in degraded mode" -ForegroundColor Yellow
+            Write-Host "  Fix firewall rules for: winatp-gw-*.microsoft.com, events.data.microsoft.com" -ForegroundColor Cyan
         }
+        Write-Host ""
     }
 }
 Write-Host ""
@@ -4360,45 +3953,12 @@ Write-Host ""
 if (-not $SkipArc -and $portalShowsOnboarded) {
     $mdeExtInstalled = $status.Extensions | Where-Object { $_.Name -match "MDE.Windows" -and $_.Installed -eq $true }
     if (-not $mdeExtInstalled) {
-        Write-Host "[INFO] MDE Onboarding Method: Manual/Classic (not Arc-managed)" -ForegroundColor Cyan
-        
-        # Check if Arc agent is actually installed before claiming it's connected
-        $arcStatus = if ($status.ArcAgent.Installed) { "Connected ✓" } else { "NOT INSTALLED ✗" }
-        $arcColor = if ($status.ArcAgent.Installed) { "Green" } else { "Red" }
-        Write-Host "       Azure Arc: $arcStatus" -ForegroundColor $arcColor
-        
-        Write-Host "       MDE Agent: Onboarded ✓ (manually, not via Arc extension)" -ForegroundColor Green
-        Write-Host "       MDE.Windows Extension: NOT INSTALLED" -ForegroundColor Yellow
-        Write-Host ""
-        
-        if ($status.ArcAgent.Installed) {
-            Write-Host "       Portal Status Breakdown:" -ForegroundColor Cyan
-            Write-Host "       ├─ 'Defender for Server': Onboarded ✓" -ForegroundColor Green
-            Write-Host "       ├─ 'Defender for Endpoint': Can be onboarded" -ForegroundColor Yellow
-            Write-Host "       └─ 'Last device update': Shows current date (device IS communicating)" -ForegroundColor Green
-            Write-Host ""
-            Write-Host "       Why 'Can be onboarded' Shows When Device IS Already Onboarded:" -ForegroundColor Yellow
-            Write-Host "         • Portal displays TWO different onboarding statuses:" -ForegroundColor Gray
-            Write-Host "           - 'Defender for Server': Shows manual onboarding status (Onboarded ✓)" -ForegroundColor Gray
-            Write-Host "           - 'Defender for Endpoint': Shows Arc extension status (Can be onboarded)" -ForegroundColor Gray
-            Write-Host "         • 'Can be onboarded' means: MDE.Windows extension can be installed" -ForegroundColor Gray
-            Write-Host "         • 'Last device update' proves device IS working and communicating" -ForegroundColor Gray
-            Write-Host ""
-            Write-Host "       Current Configuration:" -ForegroundColor Cyan
-            Write-Host "         ✓ Azure Arc agent: Connected and healthy" -ForegroundColor Green
-            Write-Host "         ✓ MDE agent: Onboarded and communicating (manual method)" -ForegroundColor Green
-            Write-Host "         ℹ MDE.Windows extension: Not installed (optional - alternative method)" -ForegroundColor Gray
-            Write-Host ""
-            Write-Host "       Summary: MDE is working correctly - no action required" -ForegroundColor Green
-            Write-Host "                (Arc extension is optional alternative to manual onboarding)" -ForegroundColor Cyan
-        } else {
-            Write-Host "       Current Configuration:" -ForegroundColor Cyan
-            Write-Host "         ✗ Azure Arc agent: NOT INSTALLED" -ForegroundColor Red
-            Write-Host "         ✓ MDE agent: Onboarded and communicating (manual onboarding method)" -ForegroundColor Green
-            Write-Host ""
-            Write-Host "       Summary: MDE is working correctly using manual onboarding" -ForegroundColor Green
-            Write-Host "                Azure Arc agent is not required for manual MDE onboarding" -ForegroundColor Cyan
-        }
+        $arcStatus = if ($status.ArcAgent.Installed) { "Connected" } else { "Not Installed" }
+        $arcColor = if ($status.ArcAgent.Installed) { "Green" } else { "Yellow" }
+        Write-Host "[INFO] MDE Onboarding: Manual/Classic (not Arc-managed)" -ForegroundColor Cyan
+        Write-Host "  Azure Arc: $arcStatus | MDE: Onboarded | MDE.Windows Extension: Not Installed" -ForegroundColor $arcColor
+        Write-Host "  Note: 'Can be onboarded' in portal refers to Arc extension, not MDE status" -ForegroundColor Gray
+        Write-Host "  Summary: MDE is working correctly - no action required" -ForegroundColor Green
         Write-Host ""
     }
 }
