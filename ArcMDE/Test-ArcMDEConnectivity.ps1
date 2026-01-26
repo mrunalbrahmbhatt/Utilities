@@ -730,13 +730,14 @@ if ($domains.Count -eq 0) {
 }
 
 Write-Section "Test Targets"
-"Source    : $source"
-"Endpoints : $($domains.Count)"
+Write-Host "Source    : $source"
+Write-Host "Endpoints : $($domains.Count)"
 $domains | Sort-Object { if ($_ -is [hashtable]) { $_.Domain } else { $_ } } | ForEach-Object { 
     if ($_ -is [hashtable]) {
-        " - $($_.Domain) [$($_.Geo)]"
+        $purposeDisplay = if ($_.Purpose) { " - $($_.Purpose)" } else { "" }
+        Write-Host " - $($_.Domain) [$($_.Geo)]$purposeDisplay"
     } else {
-        " - $_"
+        Write-Host " - $_"
     }
 }
 
@@ -838,17 +839,15 @@ Write-Host "Proxy IP: Shows actual proxy server IP when proxy routing detected, 
 Write-Host "PvtLink: Shows 'Yes' if Azure Private Link/Private Endpoint detected (CNAME or Private IP), 'No' otherwise" -ForegroundColor Cyan
 Write-Host ""
 
-# Calculate maximum domain and purpose length for consistent column width
+# Calculate maximum domain length for consistent column width
 $maxDomainWidth = ($results | ForEach-Object { $_.Domain.Length } | Measure-Object -Maximum).Maximum
 if ($maxDomainWidth -lt 6) { $maxDomainWidth = 6 }  # Minimum width for "Domain" header
-$maxPurposeWidth = ($results | ForEach-Object { $_.Purpose.Length } | Measure-Object -Maximum).Maximum
-if ($maxPurposeWidth -lt 7) { $maxPurposeWidth = 7 }  # Minimum width for "Purpose" header
 
 # Display table header with improved spacing for better visibility
-Write-Host ("  {0,3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-$maxPurposeWidth}  {8,-4}  {9,-8}  {10,-6}  {11,-6}  {12,-16}  {13,-13}  {14}" -f `
-    "#", "Geo", "Svc", "Type", "Route", "PvtLink", "Domain", "Purpose", "DNS", "TCP:443", "HTTPS", "Status", "Target IP", "Next Hop", "Proxy IP") -ForegroundColor Cyan
-Write-Host ("  {0,-3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-$maxPurposeWidth}  {8,-4}  {9,-8}  {10,-6}  {11,-6}  {12,-16}  {13,-13}  {14}" -f `
-    "-", "---", "---", "------", "------", "--------------", ("-" * $maxDomainWidth), ("-" * $maxPurposeWidth), "---", "-------", "------", "------", "---------", "--------", "--------") -ForegroundColor Cyan
+Write-Host ("  {0,3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-4}  {8,-8}  {9,-6}  {10,-6}  {11,-16}  {12,-13}  {13}" -f `
+    "#", "Geo", "Svc", "Type", "Route", "PvtLink", "Domain", "DNS", "TCP:443", "HTTPS", "Status", "Target IP", "Next Hop", "Proxy IP") -ForegroundColor Cyan
+Write-Host ("  {0,-3}  {1,-3}  {2,-3}  {3,-6}  {4,-6}  {5,-14}  {6,-$maxDomainWidth}  {7,-4}  {8,-8}  {9,-6}  {10,-6}  {11,-16}  {12,-13}  {13}" -f `
+    "-", "---", "---", "------", "------", "--------------", ("-" * $maxDomainWidth), "---", "-------", "------", "------", "---------", "--------", "--------") -ForegroundColor Cyan
 
 # Display results with color-coded symbols
 foreach ($r in $results) {
@@ -878,9 +877,6 @@ foreach ($r in $results) {
     
     # Domain column
     Write-Host ("{0,-$maxDomainWidth}  " -f $r.Domain) -NoNewline
-    
-    # Purpose column
-    Write-Host ("{0,-$maxPurposeWidth}  " -f $r.Purpose) -ForegroundColor Gray -NoNewline
     
     # DNS column (4 chars width + 2 spaces)
     Write-Host ("{0,-4}  " -f $dnsSymbol) -ForegroundColor $dnsColor -NoNewline
