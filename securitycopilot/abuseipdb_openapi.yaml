@@ -1,10 +1,12 @@
 openapi: 3.0.0
 info:
-  title: AbuseIPDB API
+  title: AbuseIPDB
   description: Check the reputation of a public IP address using AbuseIPDB.
   version: 1.0.0
 servers:
   - url: https://api.abuseipdb.com/api/v2
+security:
+  - ApiKeyAuth: []
 paths:
   /check:
     get:
@@ -59,3 +61,9 @@ paths:
                         type: string
                       isWhitelisted:
                         type: boolean
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Key
