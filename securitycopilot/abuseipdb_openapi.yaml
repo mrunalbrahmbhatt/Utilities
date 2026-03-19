@@ -5,8 +5,6 @@ info:
   version: 1.0.0
 servers:
   - url: https://api.abuseipdb.com/api/v2
-security:
-  - ApiKeyAuth: []
 paths:
   /check:
     get:
@@ -19,6 +17,12 @@ paths:
         malicious. Only use for public IP addresses. Exclude private ranges
         such as 10.x, 172.16-31.x, 192.168.x, and 127.x.
       parameters:
+        - name: Key
+          in: header
+          required: true
+          description: Your AbuseIPDB API key. Get one free at https://www.abuseipdb.com/register
+          schema:
+            type: string
         - name: ipAddress
           in: query
           required: true
@@ -61,9 +65,3 @@ paths:
                         type: string
                       isWhitelisted:
                         type: boolean
-components:
-  securitySchemes:
-    ApiKeyAuth:
-      type: apiKey
-      in: header
-      name: Key
