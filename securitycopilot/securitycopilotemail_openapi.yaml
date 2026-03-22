@@ -1,0 +1,76 @@
+openapi: 3.0.0
+info:
+  title: Security Copilot Email
+  description: Sends an HTML-formatted security investigation report via email using an Azure Logic App.
+  version: 1.0.0
+servers:
+  - url: https://prod-31.australiaeast.logic.azure.com:443/workflows/bf5f0331504e4fe79607ad3769190073/triggers/manual/paths
+paths:
+  /invoke:
+    post:
+      operationId: Securitycopilotemail
+      summary: Send Security Copilot Email
+      description: >
+        Sends an HTML investigation report email to a specified recipient
+        via Azure Logic App. Use when CaseOutput is 1 (email only) or
+        3 (email and incident update). Requires Message, To, and Subject.
+      parameters:
+        - name: api-version
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "2016-10-01"
+        - name: sp
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "/triggers/manual/run"
+        - name: sv
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "1.0"
+        - name: sig
+          in: query
+          required: true
+          description: >
+            The SAS signature token from your Logic App HTTP trigger URL.
+            Found in the Logic App designer under the HTTP trigger.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - To
+                - Subject
+                - Message
+              properties:
+                Message:
+                  type: string
+                  description: The HTML-formatted body of the investigation report to send.
+                To:
+                  type: string
+                  description: The recipient email address.
+                Subject:
+                  type: string
+                  description: The subject line of the email.
+                  default: "User 360 Security Investigation Report"
+                CaseOutput:
+                  type: string
+                  description: "1 = Email only, 2 = Incident update only, 3 = Email + incident update."
+                  default: "1"
+                IncidentID:
+                  type: string
+                  description: Sentinel Incident ID. Required when CaseOutput is 2 or 3.
+      responses:
+        '200':
+          description: Email sent successfully.
+        '202':
+          description: Request accepted and email queued for sending.
