@@ -4,9 +4,9 @@ info:
   description: Sends an HTML-formatted security investigation report via email using an Azure Logic App.
   version: 1.0.0
 servers:
-  - url: https://prod-31.australiaeast.logic.azure.com:443/workflows/bf5f0331504e4fe79607ad3769190073/triggers/manual/paths
+  - url: https://prod-31.australiaeast.logic.azure.com:443/workflows/bf5f0331504e4fe79607ad3769190073/triggers/manual/paths/invoke
 paths:
-  /invoke:
+  /:
     post:
       operationId: Securitycopilotemail
       summary: Send Security Copilot Email
@@ -38,7 +38,6 @@ paths:
           required: true
           description: >
             The SAS signature token from your Logic App HTTP trigger URL.
-            Found in the Logic App designer under the HTTP trigger.
           schema:
             type: string
       requestBody:
