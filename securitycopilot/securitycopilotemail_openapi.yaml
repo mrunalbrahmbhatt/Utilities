@@ -7,13 +7,6 @@ info:
 servers:
   - url: https://prod-31.australiaeast.logic.azure.com:443/workflows/bf5f0331504e4fe79607ad3769190073/triggers/manual/paths
 
-components:
-  securitySchemes:
-    LogicAppSig:
-      type: apiKey
-      in: query
-      name: sig
-
 paths:
   /invoke:
     post:
@@ -22,9 +15,6 @@ paths:
       description: >
         Sends an HTML investigation report email to a specified recipient via Azure Logic App.
         Requires Message, To, and Subject.
-      security:
-        - LogicAppSig: []
-
       parameters:
         - name: api-version
           in: query
@@ -65,9 +55,11 @@ paths:
                 Subject:
                   type: string
                   description: The subject line of the email.
+                  default: "User 360 Security Investigation Report"
                 CaseOutput:
                   type: string
                   description: "1 = Email only, 2 = Incident update only, 3 = Email + incident update."
+                  default: "1"
                 IncidentID:
                   type: string
                   description: Sentinel Incident ID. Required when CaseOutput is 2 or 3.
