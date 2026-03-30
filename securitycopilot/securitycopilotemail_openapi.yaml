@@ -19,8 +19,12 @@ paths:
     post:
       operationId: Securitycopilotemail
       summary: Send Security Copilot Email
+      description: >
+        Sends an HTML investigation report email to a specified recipient via Azure Logic App.
+        Requires Message, To, and Subject.
       security:
         - LogicAppSig: []
+
       parameters:
         - name: api-version
           in: query
@@ -40,24 +44,34 @@ paths:
           schema:
             type: string
             default: "1.0"
+
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [To, Subject, Message]
+              required:
+                - To
+                - Subject
+                - Message
               properties:
                 Message:
                   type: string
+                  description: The HTML-formatted body of the investigation report to send.
                 To:
                   type: string
+                  description: The recipient email address.
                 Subject:
                   type: string
+                  description: The subject line of the email.
                 CaseOutput:
                   type: string
+                  description: "1 = Email only, 2 = Incident update only, 3 = Email + incident update."
                 IncidentID:
                   type: string
+                  description: Sentinel Incident ID. Required when CaseOutput is 2 or 3.
+
       responses:
         "200":
           description: Email sent successfully.
