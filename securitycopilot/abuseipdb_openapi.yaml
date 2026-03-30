@@ -1,41 +1,54 @@
 openapi: 3.0.0
+
 info:
   title: AbuseIPDB
-  description: Check the reputation of a public IP address using AbuseIPDB.
+  description: >
+    Check the reputation of a public IP address using AbuseIPDB.
+    Returns abuse confidence score, country, ISP, domain, total abuse reports,
+    and last reported date.
   version: 1.0.0
+
 servers:
   - url: https://api.abuseipdb.com/api/v2
+
+components:
+  securitySchemes:
+    AbuseIPDBApiKey:
+      type: apiKey
+      in: header
+      name: Key
+
+security:
+  - AbuseIPDBApiKey: []
+
 paths:
   /check:
     get:
       operationId: CheckIpAddressReputation
       summary: Check IP Address Reputation
       description: >
-        Enriches a public IP address using AbuseIPDB. Returns abuse confidence
-        score (0-100), country, ISP, domain, total abuse reports, and last
-        reported date. Scores >= 25 indicate suspicious, >= 75 indicate
-        malicious. Only use for public IP addresses. Exclude private ranges
-        such as 10.x, 172.16-31.x, 192.168.x, and 127.x.
+        Enriches a public IP address using AbuseIPDB.
+        Returns abuse confidence score (0-100), country, ISP, domain,
+        total abuse reports, and last reported date.
+        Scores >=25 indicate suspicious, >=75 indicate malicious.
+        Only use for public IP addresses.
+        Exclude private ranges such as 10.x, 172.16-31.x, 192.168.x, and 127.x.
       parameters:
-        - name: Key
-          in: header
-          required: true
-          description: Your AbuseIPDB API key. Get one free at https://www.abuseipdb.com/register
-          schema:
-            type: string
         - name: ipAddress
           in: query
           required: true
           description: The public IPv4 or IPv6 address to check.
           schema:
             type: string
+
         - name: maxAgeInDays
           in: query
           required: false
-          description: Only return reports submitted within this many days. Default is 90.
+          description: Only return reports submitted within this many days.
           schema:
             type: integer
             default: 90
+
       responses:
         '200':
           description: Successful response with IP reputation data.
