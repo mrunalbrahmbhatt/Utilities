@@ -5,7 +5,9 @@ info:
   version: 1.0.0
 
 servers:
-  - url: https://prod-31.australiaeast.logic.azure.com:443/workflows/bf5f0331504e4fe79607ad3769190073/triggers/manual/paths/invoke
+  - url: https://prod-06.australiaeast.logic.azure.com:443/workflows/6b91d727d88d4e0b8887e3137c4a96ea/triggers/manual/paths/invoke
+  #https://prod-31.australiaeast.logic.azure.com:443/workflows/bf5f0331504e4fe79607ad3769190073/triggers/manual/paths/invoke
+  #https://prod-06.australiaeast.logic.azure.com:443/workflows/6b91d727d88d4e0b8887e3137c4a96ea/triggers/manual/paths/invoke
 
 paths:
   /:
